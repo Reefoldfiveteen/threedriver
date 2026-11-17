@@ -1,7 +1,7 @@
 """3Driver Live: drive THIS Blender from another process on the same machine.
 
 A TCP server on 127.0.0.1 (never exposed) accepts newline-delimited JSON
-commands: ping, get_scene, execute_code, screenshot, shutdown. The socket
+commands: ping, get_scene, execute_code, screenshot, set_viewport, shutdown. The socket
 thread ONLY receives and parses; every command executes on Blender's main
 thread via a bpy.app.timers pump, because bpy is NOT thread-safe and any
 bpy access from another thread can crash Blender.
@@ -31,7 +31,7 @@ Protocol (one JSON object per line, "\\n" terminated):
 bl_info = {
     "name": "3Driver Live",
     "author": "Reefoldfiveteen",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > 3Driver",
     "description": "Local socket server so 3Driver can drive this Blender "
@@ -311,6 +311,31 @@ def _screenshot(filepath: str | None) -> dict:
     return {"ok": True, "filepath": filepath, "bytes": size}
 
 
+def _set_viewport(shading: str | None) -> dict:
+    """Switch every 3D viewport's shading (SOLID/WIREFRAME/MATERIAL).
+
+    View-only: no save, no backup, no scene change. This only sets a
+    property, so it can succeed even headless (background Blender still
+    exposes a screen); the screenshot is what proves the viewport
+    visually. Returns ok:false only when there is no screen or no 3D
+    viewport at all.
+    """
+    if shading not in ("WIREFRAME", "SOLID", "MATERIAL", "RENDERED"):
+        return {"ok": False, "error": f"unknown shading: {shading!r}"}
+    screen = bpy.context.screen
+    if screen is None:
+        return {"ok": False,
+                "error": "no screen: viewport shading needs the Blender GUI"}
+    changed = 0
+    for area in screen.areas:
+        if area.type == "VIEW_3D":
+            area.spaces.active.shading.type = shading
+            changed += 1
+    if not changed:
+        return {"ok": False, "error": "no 3D viewport open"}
+    return {"ok": True, "result": shading, "viewports": changed}
+
+
 def _execute_command(cmd: dict) -> dict:
     ctype = cmd.get("type")
     if ctype == "ping":
@@ -325,6 +350,8 @@ def _execute_command(cmd: dict) -> dict:
         return _execute_code(code)
     if ctype == "screenshot":
         return _screenshot(cmd.get("filepath"))
+    if ctype == "set_viewport":
+        return _set_viewport(cmd.get("shading"))
     if ctype == "shutdown":
         _state["stop_requested"] = True
         return {"ok": True, "result": "shutting down"}

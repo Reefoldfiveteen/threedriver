@@ -34,6 +34,14 @@
   pre { background: #111827; color: #e5e7eb; padding: 10px; border-radius: 6px; overflow: auto; font-size: 12px; max-height: 300px; }
   details { margin-top: 8px; } summary { cursor: pointer; font-size: 13px; font-weight: 600; }
   a { color: #2563eb; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+  .tab { flex: 1; background: #e5e7eb; color: #374151; margin-top: 0; }
+  .tab.active { background: #1f2937; color: #fff; }
+  .chatmsg { border: 1px solid #e5e7eb; border-radius: 10px; padding: 10px 12px; margin-top: 10px; font-size: 14px; }
+  .chatmsg.user { background: #eff6ff; margin-left: 40px; }
+  .chatmsg.assistant { background: #f9fafb; margin-right: 40px; }
+  .chatmsg .meta { font-size: 12px; color: #6b7280; margin-top: 6px; }
+  .chatmsg img { max-width: 100%; border-radius: 6px; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -75,21 +83,13 @@
   <div id="settingsMsg" class="msg"></div>
 </div>
 
-<div class="card">
-  <h2>Live Blender — viewport &amp; kontrol</h2>
-  <div class="hint">Supaya ini jalan, Blender harus kebuka dan servernya nyala: di Blender, N-panel &gt; tab 3Driver &gt; Start Server. Kode yang dijalankan dari sini selalu didahului save + backup .blend oleh addon.</div>
-  <div id="liveStatus" style="margin-top:10px;font-size:13px;">Status live belum dicek.</div>
-  <button id="liveRefreshBtn" class="secondary">Refresh status</button>
-  <button id="liveShotBtn" class="secondary">Ambil screenshot viewport</button>
-  <img id="viewportImg" alt="viewport Blender">
-  <div id="liveScene"></div>
-  <label for="liveCode">Kode bpy untuk dijalankan di live Blender</label>
-  <textarea id="liveCode" placeholder="Contoh: import bpy, lalu print([o.name for o in bpy.data.objects])"></textarea>
-  <button id="liveExecBtn">Jalankan kode di live Blender</button>
-  <pre id="liveOut" style="display:none"></pre>
-  <div id="liveMsg" class="msg"></div>
-</div>
+<nav class="tabs">
+  <button class="tab active" data-tab="tab-make">Buat model (headless)</button>
+  <button class="tab" data-tab="tab-live">Live viewport</button>
+  <button class="tab" data-tab="tab-chat">Chat mod</button>
+</nav>
 
+<section id="tab-make">
 <div class="card">
   <h2>Buat model</h2>
   <label for="prompt">Prompt — jelaskan part-nya, sebutkan ukuran kalau ada</label>
@@ -104,16 +104,71 @@
   <h2>Jobs</h2>
   <div id="jobs"><p class="hint">Belum ada job. Job yang sedang jalan tampil di sini.</p></div>
 </div>
+</section>
+
+<section id="tab-live" hidden>
+<div class="card">
+  <h2>Live Blender — viewport &amp; kontrol</h2>
+  <div class="hint">Supaya ini jalan, Blender harus kebuka dan servernya nyala: di Blender, N-panel &gt; tab 3Driver &gt; Start Server. Kode yang dijalankan dari sini selalu didahului save + backup .blend oleh addon. Tombol shading butuh addon 0.2.0+ (install ulang .zip terbaru kalau gagal).</div>
+  <div id="liveStatus" style="margin-top:10px;font-size:13px;">Status live belum dicek.</div>
+  <button id="liveRefreshBtn" class="secondary">Refresh status</button>
+  <button id="liveShotBtn" class="secondary">Ambil screenshot viewport</button>
+  <button id="shadeSolidBtn" class="secondary">Viewport: Solid</button>
+  <button id="shadeWireBtn" class="secondary">Viewport: Wireframe</button>
+  <img id="viewportImg" alt="viewport Blender">
+  <div id="liveScene"></div>
+  <label for="liveCode">Kode bpy untuk dijalankan di live Blender</label>
+  <textarea id="liveCode" placeholder="Contoh: import bpy, lalu print([o.name for o in bpy.data.objects])"></textarea>
+  <button id="liveExecBtn">Jalankan kode di live Blender</button>
+  <pre id="liveOut" style="display:none"></pre>
+  <div id="liveMsg" class="msg"></div>
+</div>
+</section>
+
+<section id="tab-chat" hidden>
+<div class="card">
+  <h2>Chat mod — revisi model lewat obrolan</h2>
+  <div class="hint">Tiap chat terikat ke satu model. Pesan pertama membuat modelnya; pesan lanjutan merevisi model yang sama, dan hanya bagian yang diminta yang berubah. Upload referensi baru kapan saja. Target Headless membangun ulang di proses baru (terverifikasi); target Live mengubah Blender yang sedang terbuka (addon save + backup dulu, scene dibangun ulang).</div>
+  <div class="row">
+    <div><label for="chatSelect">Chat</label><select id="chatSelect"></select></div>
+    <div><label for="baseJob">Chat baru dari job (opsional)</label><select id="baseJob"><option value="">model baru dari nol</option></select></div>
+  </div>
+  <button id="newChatBtn" class="secondary">Chat baru</button>
+  <div id="chatMsgs"></div>
+  <label for="chatText">Pesan — jelaskan perubahannya</label>
+  <textarea id="chatText" placeholder="Contoh: lubangnya jadi 6, diameter 12 mm, dan tingginya jadi 14 mm"></textarea>
+  <label for="chatImages">Referensi baru (opsional, maks 5, @ maks 10 MB)</label>
+  <input type="file" id="chatImages" accept="image/*" multiple>
+  <div class="row">
+    <div><label for="chatTarget">Target</label><select id="chatTarget"><option value="headless">Headless (proses baru, terverifikasi)</option><option value="live">Live (Blender yang terbuka)</option></select></div>
+  </div>
+  <button id="chatSendBtn">Kirim</button>
+  <div id="chatMsg" class="msg"></div>
+</div>
+</section>
 
 </main>
 <script>
 const $ = id => document.getElementById(id);
 let providers = [];
 
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
 function showMsg(el, text, ok) {
   el.textContent = text; el.className = 'msg ' + (ok ? 'ok' : 'err');
 }
 
+/* ---- tabs ---- */
+function showTab(id) {
+  for (const sec of document.querySelectorAll('main > section')) sec.hidden = sec.id !== id;
+  for (const b of document.querySelectorAll('.tab')) b.classList.toggle('active', b.dataset.tab === id);
+  try { localStorage.setItem('td-tab', id); } catch (e) {}
+}
+document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+try { showTab(localStorage.getItem('td-tab') || 'tab-make'); } catch (e) { showTab('tab-make'); }
+
+/* ---- settings ---- */
 async function loadSettings() {
   const [provRes, setRes] = await Promise.all([fetch('/api/providers'), fetch('/api/settings')]);
   const prov = await provRes.json(), set = await setRes.json();
@@ -181,6 +236,15 @@ $('testBtn').addEventListener('click', async () => {
   showMsg($('settingsMsg'), data.ok ? ('Provider OK, balasan: ' + data.reply) : ('Provider gagal: ' + (data.error || 'unknown')), data.ok);
 });
 
+$('testBlenderBtn').addEventListener('click', async () => {
+  showMsg($('settingsMsg'), 'Mencari Blender…', true);
+  const res = await fetch('/api/test-blender', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({blender: $('blender').value.trim(), blender_mode: $('blender_mode').value}) });
+  const data = await res.json();
+  showMsg($('settingsMsg'), data.ok ? ('Blender ketemu (' + data.mode + '): ' + data.path + ' (' + data.version + ')') : ('Blender tidak ketemu: ' + (data.error || 'unknown')), data.ok);
+  refreshBlenderDetection();
+});
+
+/* ---- one-shot jobs ---- */
 $('runBtn').addEventListener('click', async () => {
   const prompt = $('prompt').value.trim();
   if (!prompt) { showMsg($('jobMsg'), 'Prompt masih kosong.', false); return; }
@@ -201,6 +265,7 @@ function fileLinks(job) {
   return files.map(f => `<a href="/api/jobs/${job.job_id}/files/${encodeURIComponent(f)}" target="_blank">${f}</a>`).join(' · ');
 }
 
+let lastBaseJobIds = '';
 function renderJobs(jobs) {
   if (!jobs.length) { $('jobs').innerHTML = '<p class="hint">Belum ada job.</p>'; return; }
   $('jobs').innerHTML = jobs.map(j => {
@@ -209,11 +274,20 @@ function renderJobs(jobs) {
     const preview = (r.files || []).includes('preview.png')
       ? `<img src="/api/jobs/${j.job_id}/files/preview.png" alt="preview">` : '';
     const report = r.report ? `<details><summary>Laporan ukuran (report.json)</summary><pre>${JSON.stringify(r.report, null, 2)}</pre></details>` : '';
-    const err = j.error ? `<pre>${j.error}</pre>` : '';
-    return `<div class="job"><span class="badge ${j.status}">${j.status}</span> <strong>${j.prompt}</strong>
+    const err = j.error ? `<pre>${escapeHtml(j.error)}</pre>` : '';
+    return `<div class="job"><span class="badge ${j.status}">${j.status}</span> <strong>${escapeHtml(j.prompt)}</strong>
       <div class="hint">${j.job_id} · ${j.provider || ''} ${j.model || ''}${verified}</div>
       ${preview}<div style="margin-top:6px">${fileLinks(j)}</div>${report}${err}</div>`;
   }).join('');
+  const done = jobs.filter(j => j.status === 'done');
+  const ids = done.map(j => j.job_id).join(',');
+  if (ids !== lastBaseJobIds) {
+    lastBaseJobIds = ids;
+    const cur = $('baseJob').value;
+    $('baseJob').innerHTML = '<option value="">model baru dari nol</option>' + done.map(j =>
+      `<option value="${j.job_id}">${escapeHtml((j.prompt || '').slice(0, 50))} (${j.job_id})</option>`).join('');
+    if ([...$('baseJob').options].some(o => o.value === cur)) $('baseJob').value = cur;
+  }
 }
 
 let lastJobsJson = '';
@@ -228,14 +302,7 @@ async function refreshJobs() {
   } catch (e) { /* server restart? next poll retries */ }
 }
 
-$('testBlenderBtn').addEventListener('click', async () => {
-  showMsg($('settingsMsg'), 'Mencari Blender…', true);
-  const res = await fetch('/api/test-blender', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({blender: $('blender').value.trim(), blender_mode: $('blender_mode').value}) });
-  const data = await res.json();
-  showMsg($('settingsMsg'), data.ok ? ('Blender ketemu (' + data.mode + '): ' + data.path + ' (' + data.version + ')') : ('Blender tidak ketemu: ' + (data.error || 'unknown')), data.ok);
-  refreshBlenderDetection();
-});
-
+/* ---- live ---- */
 async function refreshLive() {
   $('liveStatus').textContent = 'Menghubungi live Blender…';
   try {
@@ -243,19 +310,32 @@ async function refreshLive() {
     if (!data.ok) { $('liveStatus').textContent = 'Live tidak terhubung: ' + (data.error || 'unknown'); $('liveScene').innerHTML = ''; return; }
     const objs = ((data.scene || {}).objects || []).map(o => o.name).join(', ') || '(kosong)';
     $('liveStatus').textContent = 'Terhubung ke Blender ' + (data.blender_version || '?') + ' (live).';
-    $('liveScene').innerHTML = '<div class="hint">Objek di scene: ' + objs.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</div>';
+    $('liveScene').innerHTML = '<div class="hint">Objek di scene: ' + escapeHtml(objs) + '</div>';
   } catch (e) { $('liveStatus').textContent = 'Gagal menghubungi server web UI.'; }
 }
 $('liveRefreshBtn').addEventListener('click', refreshLive);
 
-$('liveShotBtn').addEventListener('click', async () => {
-  showMsg($('liveMsg'), 'Mengambil screenshot viewport…', true);
+async function refreshViewport() {
   const data = await (await fetch('/api/live/screenshot', { method: 'POST' })).json();
-  if (!data.ok) { showMsg($('liveMsg'), 'Screenshot gagal: ' + (data.error || 'unknown'), false); return; }
+  if (!data.ok) { showMsg($('liveMsg'), 'Screenshot gagal: ' + (data.error || 'unknown'), false); return false; }
   $('viewportImg').src = '/api/live/viewport.png?t=' + Date.now();
   $('viewportImg').style.display = 'block';
   showMsg($('liveMsg'), 'Screenshot viewport diperbarui (' + data.bytes + ' byte).', true);
+  return true;
+}
+$('liveShotBtn').addEventListener('click', async () => {
+  showMsg($('liveMsg'), 'Mengambil screenshot viewport…', true);
+  await refreshViewport();
 });
+
+async function setShading(shading) {
+  showMsg($('liveMsg'), 'Mengubah shading viewport ke ' + shading + '…', true);
+  const data = await (await fetch('/api/live/viewport', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({shading}) })).json();
+  if (!data.ok) { showMsg($('liveMsg'), 'Shading gagal: ' + (data.error || 'unknown') + ' (butuh addon 0.2.0+? install ulang .zip terbaru)', false); return; }
+  await refreshViewport();
+}
+$('shadeSolidBtn').addEventListener('click', () => setShading('SOLID'));
+$('shadeWireBtn').addEventListener('click', () => setShading('WIREFRAME'));
 
 $('liveExecBtn').addEventListener('click', async () => {
   const code = $('liveCode').value;
@@ -269,10 +349,94 @@ $('liveExecBtn').addEventListener('click', async () => {
   showMsg($('liveMsg'), data.ok ? 'Kode selesai dijalankan.' : ('Kode gagal: ' + (data.error || 'unknown')), !!data.ok);
 });
 
+/* ---- chat mod ---- */
+let currentChat = null, chatPollTimer = null;
+
+function chatFileLinks(chatId, version, files) {
+  return (files || []).map(f => `<a href="/api/chats/${chatId}/files/v${version}/${encodeURIComponent(f)}" target="_blank">${f}</a>`).join(' · ');
+}
+
+function renderChat(session) {
+  const el = $('chatMsgs');
+  if (!session.messages.length) { el.innerHTML = '<p class="hint">Belum ada pesan. Pesan pertama akan membuat modelnya.</p>'; return; }
+  el.innerHTML = session.messages.map(m => {
+    if (m.role === 'user') {
+      const imgs = (m.images || []).map(n => `<a href="/api/chats/${session.id}/files/v${m.version}/${encodeURIComponent(n)}" target="_blank">${n}</a>`).join(' · ');
+      return `<div class="chatmsg user"><div>${escapeHtml(m.text).replace(/\n/g, '<br>')}</div>
+        <div class="meta">kamu · target ${m.target || ''}${imgs ? ' · referensi: ' + imgs : ''}</div></div>`;
+    }
+    if (m.status === 'error') {
+      return `<div class="chatmsg assistant"><span class="badge error">gagal</span>
+        <pre>${escapeHtml(m.error || 'unknown')}</pre></div>`;
+    }
+    const preview = m.preview
+      ? `<img src="/api/chats/${session.id}/files/v${m.version}/${encodeURIComponent(m.preview)}" alt="preview v${m.version}">` : '';
+    const ver = m.verified === true ? ' · terverifikasi' : (m.verified === false ? ' · verifikasi GAGAL' : '');
+    return `<div class="chatmsg assistant"><div>${escapeHtml(m.text).replace(/\n/g, '<br>')}</div>${preview}
+      <div class="meta">v${m.version} · ${m.target || ''}${ver} · ${chatFileLinks(session.id, m.version, m.files)}</div></div>`;
+  }).join('') + (session.pending
+    ? `<div class="chatmsg assistant"><span class="badge ${session.pending.stage || 'queued'}">${session.pending.stage || 'jalan'}</span> Sedang memproses giliran v${session.pending.turn} (${session.pending.target})…</div>` : '');
+}
+
+async function openChat(chatId) {
+  currentChat = chatId;
+  if (chatPollTimer) { clearTimeout(chatPollTimer); chatPollTimer = null; }
+  const session = await (await fetch('/api/chats/' + chatId)).json();
+  renderChat(session);
+  if (session.pending) chatPollTimer = setTimeout(() => openChat(chatId), 2500);
+  $('chatSendBtn').disabled = !!session.pending;
+}
+
+async function loadChats() {
+  const data = await (await fetch('/api/chats')).json();
+  const sel = $('chatSelect');
+  sel.innerHTML = data.chats.map(c => `<option value="${c.id}">${escapeHtml(c.title || c.id)} (${c.versions} versi)</option>`).join('');
+  if (data.chats.length) {
+    if (!currentChat || !data.chats.some(c => c.id === currentChat)) currentChat = data.chats[0].id;
+    sel.value = currentChat;
+    openChat(currentChat);
+  } else {
+    currentChat = null;
+    $('chatMsgs').innerHTML = '<p class="hint">Belum ada chat. Pencet Chat baru.</p>';
+  }
+}
+$('chatSelect').addEventListener('change', () => openChat($('chatSelect').value));
+
+$('newChatBtn').addEventListener('click', async () => {
+  const res = await fetch('/api/chats', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({base_job_id: $('baseJob').value || ''}) });
+  if (!res.ok) { showMsg($('chatMsg'), 'Gagal membuat chat: ' + await res.text(), false); return; }
+  const data = await res.json();
+  currentChat = data.id;
+  await loadChats();
+  showMsg($('chatMsg'), data.has_model ? 'Chat dibuat dari job, model awal sudah terisi.' : 'Chat baru dibuat.', true);
+});
+
+$('chatSendBtn').addEventListener('click', async () => {
+  if (!currentChat) { showMsg($('chatMsg'), 'Buat chat dulu.', false); return; }
+  const text = $('chatText').value.trim();
+  if (!text) { showMsg($('chatMsg'), 'Pesan masih kosong.', false); return; }
+  const fd = new FormData();
+  fd.append('text', text);
+  fd.append('target', $('chatTarget').value);
+  for (const f of $('chatImages').files) fd.append('images', f);
+  $('chatSendBtn').disabled = true;
+  const res = await fetch('/api/chats/' + currentChat + '/messages', { method: 'POST', body: fd });
+  if (!res.ok) {
+    $('chatSendBtn').disabled = false;
+    showMsg($('chatMsg'), 'Gagal mengirim: ' + await res.text(), false);
+    return;
+  }
+  $('chatText').value = '';
+  $('chatImages').value = '';
+  showMsg($('chatMsg'), 'Giliran jalan…', true);
+  openChat(currentChat);
+});
+
 loadSettings();
 refreshJobs();
 refreshLive();
 refreshBlenderDetection();
+loadChats();
 setInterval(refreshJobs, 2500);
 </script>
 </body>

@@ -7,6 +7,7 @@ Usage (start the server in Blender first: N-panel > 3Driver > Start Server):
     python scripts/live_cmd.py exec my_code.py
     python scripts/live_cmd.py exec - < my_code.py
     python scripts/live_cmd.py shot /tmp/view.png
+    python scripts/live_cmd.py viewport WIREFRAME
     python scripts/live_cmd.py shutdown
 
 Prints the JSON response. Exit code 1 when the server reports ok=false.
@@ -40,6 +41,9 @@ def parse_args(argv=None):
     p_exec.add_argument("path")
     p_shot = sub.add_parser("shot", help="viewport screenshot to a file")
     p_shot.add_argument("filepath")
+    p_view = sub.add_parser(
+        "viewport", help="set 3D viewport shading (WIREFRAME/SOLID/MATERIAL)")
+    p_view.add_argument("shading")
     sub.add_parser("shutdown")
     return p.parse_args(argv)
 
@@ -64,6 +68,8 @@ def main(argv=None) -> int:
                 resp = client.execute(code)
             elif args.command == "shot":
                 resp = client.screenshot(args.filepath)
+            elif args.command == "viewport":
+                resp = client.set_viewport(args.shading.upper())
             elif args.command == "shutdown":
                 resp = client.shutdown()
             else:

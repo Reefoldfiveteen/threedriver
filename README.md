@@ -6,7 +6,7 @@ or live — and hands back a `.blend`, exports, a preview render, and a
 measurement report. The name means "the thing that drives Blender", not a
 hardware driver.
 
-Status: **POC-4 — web UI live tab.** Pick a provider on the Settings page,
+Status: **POC-5 — chat mod.** Pick a provider on the Settings page,
 type a prompt, get a verified model — or drive the Blender already open on
 your screen and watch the viewport change. The CAD bridges come next. See
 `RESEARCH-HYBRID.md` for the full design (in Indonesian).
@@ -140,6 +140,33 @@ shutdown). Two things only the laptop GUI can prove: the timer pump firing
 under the real event loop, and viewport screenshots — try `live_cmd.py
 shot` once on the laptop and confirm the PNG shows the viewport.
 
+Viewport shading (addon 0.2.0+): `live_cmd.py viewport WIREFRAME` (or the
+Solid/Wireframe buttons in the Live tab) switches every 3D viewport's
+shading without touching the scene — no save, no backup. Older addons
+answer "unknown command type": reinstall the .zip.
+
+## Chat mod (POC-5): revise a model across follow-up turns
+
+One-shot generation is only half the job. The **Chat mod** tab (third tab
+in the web UI) holds conversations anchored to one model each:
+
+* The first message builds the model (full pipeline).
+* Every later message revises it: the LLM revises the stored spec JSON,
+  changing ONLY what was asked, writes a fresh script from the revised
+  spec, and applies it. New reference images can be uploaded on any turn.
+* Each turn targets **headless** (fresh process, probe-verified, a new
+  `versions/v<n>/` directory) or **live** (the full script runs in the
+  open Blender — the addon saves + backs up first — then a viewport
+  screenshot is captured). A chat can mix targets turn by turn.
+* A chat can also start from a finished one-shot job (pick it in the
+  "Chat baru dari job" dropdown): the job's spec + script seed the chat.
+
+Live rebuild semantics, stated plainly: a live turn runs the whole
+script, which clears the scene first. The pre-mod file survives only as
+the addon's timestamped backup copy, and after the turn the active file
+in Blender is the new version's `model.blend`. Headless turns never
+touch the open Blender.
+
 ## Job contract
 
 * Invocation is always an argument list with `shell=False`:
@@ -196,10 +223,11 @@ threedriver/
   scan.py             pre-execution text scan
   config.py           settings file + provider registry (keys masked)
   pipeline.py         prompt -> spec -> script -> build -> verify
-  webapp.py           FastAPI app: settings, jobs, file downloads
+  webapp.py           FastAPI app: settings, jobs, live tab, chat-mod
   web/index.html      the UI (single page, no build step)
   providers/          stub, OpenAI-compatible, Gemini clients
   live_client.py      client for the live addon socket (localhost + token)
+  chat.py             chat-mod sessions: spec revision + headless/live turns
   bpy/probe.py        re-probes a saved .blend in a fresh Blender process
   bpy/live_test_driver.py  headless driver for the live addon test
 examples/             bpy scripts (the shape LLM output takes)
@@ -209,6 +237,7 @@ scripts/
   serve.py            CLI: start the web UI
   smoke_web.py        end-to-end web UI smoke test (stub provider)
   smoke_live_ui.py    end-to-end live-tab smoke test (headless live server)
+  smoke_chat.py       end-to-end chat-mod smoke test (stub + live server)
   live_cmd.py         CLI: talk to a running live Blender
   test_live_headless.py  end-to-end live addon test (headless Blender)
   package_addon.py    zip the live addon for Blender Install from Disk
@@ -222,7 +251,10 @@ RESEARCH-HYBRID.md    architecture, contracts, POC plan (Indonesian)
 2. POC-2 provider wiring + local web UI — done.
 3. POC-3 live socket addon — done.
 4. POC-4 web UI live tab (headless test + live settings, viewport
-   screenshot, code exec from the browser) — done (this release).
-5. Next: revision loop (vision check + fix only what missed).
-6. Optional: CadQuery executor for prismatic parts, local instant-mesh
+   screenshot, code exec from the browser) — done.
+5. POC-5 chat mod (follow-up revisions, headless/live targets, tab
+   switcher, viewport wireframe toggle) — done (this release).
+6. Next: vision check of renders vs reference (six-side ortho renders
+   compared by a vision model, revising only what missed).
+7. Optional: CadQuery executor for prismatic parts, local instant-mesh
    models (TripoSR), 3ds Max / Inventor bridges.

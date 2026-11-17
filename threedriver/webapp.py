@@ -6,8 +6,12 @@ polls job status. Job state is in-memory; job outputs live on disk under
 tmp/jobs/<job_id>/ and survive a server restart.
 
 The Live tab talks to the 3Driver Live addon in an open Blender (status,
-viewport screenshot, execute code) over localhost + token. A stopped live
-server is a normal state: live endpoints report ok:false, never crash.
+viewport screenshot, viewport shading, execute code) over localhost +
+token. A stopped live server is a normal state: live endpoints report
+ok:false, never crash.
+
+Chat-mod sessions (see chat.py) revise one model across follow-up turns;
+turns also run in worker threads and the UI polls the session.
 
 Start:  python scripts/serve.py   (then open http://127.0.0.1:8765)
 """
@@ -22,6 +26,14 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
+from .chat import (
+    chats_root,
+    create_session,
+    list_sessions,
+    load_session,
+    run_mod_turn,
+    save_session,
+)
 from .config import (
     default_settings_path,
     load_settings,
@@ -231,6 +243,134 @@ def live_exec(payload: dict) -> dict:
             return client.execute(code, timeout=120.0)
     except LiveError as exc:
         return {"ok": False, "error": str(exc)}
+
+
+@app.post("/api/live/viewport")
+def live_viewport(payload: dict) -> dict:
+    """Switch the live 3D viewport shading (view-only: no save, no scene
+    change). Needs addon 0.2.0+; older addons answer 'unknown command'."""
+    shading = str((payload or {}).get("shading") or "").upper()
+    if shading not in ("WIREFRAME", "SOLID", "MATERIAL", "RENDERED"):
+        raise HTTPException(
+            400, "shading must be WIREFRAME, SOLID, MATERIAL or RENDERED")
+    try:
+        with _live_client(load_settings()) as client:
+            return client.set_viewport(shading)
+    except LiveError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _get_session_or_404(chat_id: str) -> tuple[dict, Path]:
+    root = chats_root(load_settings())
+    try:
+        session = load_session(root, chat_id)
+    except ValueError:
+        raise HTTPException(400, "bad chat id")
+    if session is None:
+        raise HTTPException(404, "unknown chat")
+    return session, root
+
+
+def _run_turn_thread(chat_id: str, prompt: str, image_data, target: str,
+                     settings: dict) -> None:
+    try:
+        run_mod_turn(settings=settings, root=chats_root(settings),
+                     chat_id=chat_id, prompt=prompt, images=image_data,
+                     target=target)
+    except Exception as exc:  # noqa: BLE001 - never strand a pending turn
+        try:
+            root = chats_root(settings)
+            session = load_session(root, chat_id)
+            if session is not None:
+                session["pending"] = None
+                session["messages"].append(
+                    {"role": "assistant", "text": "", "status": "error",
+                     "error": f"turn crashed: {exc}", "target": target})
+                save_session(root, session)
+        except Exception:
+            pass
+
+
+@app.post("/api/chats")
+def create_chat(payload: dict | None = None) -> dict:
+    settings = load_settings()
+    root = chats_root(settings)
+    base_job_id = (payload or {}).get("base_job_id") or ""
+    base_job_dir = None
+    if base_job_id:
+        with _jobs_lock:
+            job = _jobs.get(base_job_id)
+        if job is not None and "result" in job:
+            base_job_dir = job["result"].get("job_dir")
+    session = create_session(root, base_job_dir=base_job_dir)
+    if base_job_id and base_job_dir:
+        session["base_job_id"] = base_job_id
+        save_session(root, session)
+    return {"id": session["id"], "title": session["title"],
+            "has_model": session["spec"] is not None}
+
+
+@app.get("/api/chats")
+def list_chats() -> dict:
+    return {"chats": list_sessions(chats_root(load_settings()))}
+
+
+@app.get("/api/chats/{chat_id}")
+def get_chat(chat_id: str) -> dict:
+    session, _root = _get_session_or_404(chat_id)
+    return session
+
+
+@app.post("/api/chats/{chat_id}/messages")
+async def post_chat_message(
+    chat_id: str,
+    text: str = Form(...),
+    target: str = Form("headless"),
+    images: list[UploadFile] = File(default=[]),
+) -> dict:
+    settings = load_settings()
+    session, root = _get_session_or_404(chat_id)
+    if session.get("pending"):
+        raise HTTPException(409, "a turn is already running in this chat")
+    text = (text or "").strip()
+    if not text:
+        raise HTTPException(400, "message text must not be empty")
+    if target not in ("headless", "live"):
+        raise HTTPException(400, "target must be 'headless' or 'live'")
+    if len(images) > MAX_IMAGES:
+        raise HTTPException(400, f"at most {MAX_IMAGES} images")
+    image_data = []
+    for upload in images:
+        data = await upload.read()
+        if len(data) > MAX_IMAGE_BYTES:
+            raise HTTPException(400, f"{upload.filename}: larger than 10 MB")
+        if not (upload.content_type or "").startswith("image/"):
+            raise HTTPException(400, f"{upload.filename}: not an image")
+        image_data.append((data, upload.content_type))
+    thread = threading.Thread(
+        target=_run_turn_thread,
+        args=(chat_id, text, image_data, target, settings), daemon=True)
+    thread.start()
+    return {"status": "queued", "chat_id": chat_id}
+
+
+@app.get("/api/chats/{chat_id}/files/{version}/{filename}")
+def get_chat_file(chat_id: str, version: str, filename: str):
+    if ("/" in filename or "\\" in filename or filename in ("", ".", "..")
+            or not (version.startswith("v") and version[1:].isdigit())):
+        raise HTTPException(400, "bad filename")
+    _session, root = _get_session_or_404(chat_id)
+    version_dir = (Path(root) / chat_id / "versions" / version).resolve()
+    path = (version_dir / filename).resolve()
+    if path.parent != version_dir or not path.is_file():
+        raise HTTPException(404, "file not found")
+    media = {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".json": "application/json", ".log": "text/plain",
+        ".py": "text/plain", ".stl": "application/octet-stream",
+        ".blend": "application/octet-stream",
+    }.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(path, media_type=media, filename=filename)
 
 
 @app.post("/api/jobs")

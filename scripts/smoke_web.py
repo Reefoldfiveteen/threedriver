@@ -39,6 +39,10 @@ def main() -> int:
     if settings_path.exists():
         settings_path.unlink()
     env = dict(os.environ, THREEDRIVER_SETTINGS=str(settings_path))
+    blender_exe = Path.home() / "workspace" / "tools" / "blender-current" / "blender"
+    if blender_exe.is_file():
+        # The runtime's Blender is not on PATH; point the server at it.
+        env["THREEDRIVER_BLENDER"] = str(blender_exe)
     proc = subprocess.Popen(
         [sys.executable, str(ROOT / "scripts" / "serve.py"), "--port", str(PORT)],
         cwd=ROOT, env=env,

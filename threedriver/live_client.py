@@ -137,5 +137,8 @@ class LiveClient:
     def screenshot(self, filepath: str) -> dict:
         return self.call("screenshot", filepath=filepath)
 
+    def set_viewport(self, shading: str) -> dict:
+        return self.call("set_viewport", shading=shading)
+
     def shutdown(self) -> dict:
         return self.call("shutdown")
