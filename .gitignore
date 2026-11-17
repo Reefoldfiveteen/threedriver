@@ -1,0 +1,24 @@
+# Secrets: never commit real keys.
+.env
+.env.*
+!.env.example
+
+# Job outputs (isolated per job, regenerable).
+tmp/
+
+# Python.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Blender backups.
+*.blend1
+*.blend2
+
+# OS.
+.DS_Store
+Thumbs.db
