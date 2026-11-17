@@ -6,7 +6,7 @@ or live — and hands back a `.blend`, exports, a preview render, and a
 measurement report. The name means "the thing that drives Blender", not a
 hardware driver.
 
-Status: **Chat mod with shared chooser + delete history (0.9.0), plus model-list fetch in Settings.** Pick a provider on the Settings page,
+Status: **Auto-fix retry loop for failed scripts (0.10.0)**, plus shared chat chooser + delete history and model-list fetch in Settings. Pick a provider on the Settings page,
 type a prompt, get a verified model — or drive the Blender already open on
 your screen and watch the viewport change. The CAD bridges come next. See
 `RESEARCH-HYBRID.md` for the full design (in Indonesian).
@@ -206,6 +206,21 @@ session directories under `tmp/chats/` (messages, versions, uploads) —
 there is no undo. The API is `DELETE /api/chats/{id}` and
 `DELETE /api/chats`.
 
+When a generated script CRASHES in Blender (a wrong keyword argument,
+a missing attribute — common with complex shapes, where the model
+reaches for bmesh.ops it half-remembers), the turn no longer fails
+outright: the traceback goes back to the model with a fix prompt, and
+the repaired script runs again — up to 2 repairs per turn (3 attempts
+total). This covers one-shot headless jobs, chat turns on both
+targets, and one-shot live builds. Failed headless attempts are kept
+as `generated_attempt<N>.py` next to `generated.py`, the result records
+`attempts`, and the turn message says the script was auto-fixed.
+Timeouts and live-connection problems are NOT retried. The codegen
+prompts also pin the real bmesh.ops signatures (Blender 5.2:
+`create_cone` takes `cap_ends` and `cap_tris`, not `cap_end` /
+`cap_triangles`), and tell the model to build meshes vertex-by-vertex
+when unsure.
+
 ## Job contract
 
 * Invocation is always an argument list with `shell=False`:
@@ -277,6 +292,7 @@ scripts/
   smoke_web.py        end-to-end web UI smoke test (stub provider)
   smoke_live_ui.py    end-to-end live-panel smoke test (headless live server)
   test_addon_chat.py  headless test: addon Live Chat client vs a mock web UI
+  test_retry.py       retry loop: fake provider fails once (cap_end), real Blender + live server
   smoke_chat.py       end-to-end chat-mod smoke test (stub + live server)
   smoke_models.py     model-list fetch smoke test (mock provider servers)
   live_cmd.py         CLI: talk to a running live Blender
@@ -302,8 +318,11 @@ RESEARCH-HYBRID.md    architecture, contracts, POC plan (Indonesian)
    addon Live Chat panel (addon 0.4.0) — done (0.8.0).
 8. Shared chat chooser (browser + addon, same list) + delete chat
    history (per-chat + delete-all in Settings, addon 0.5.0) — done
-   (0.9.0, this release).
-9. Next: vision check of renders vs reference (six-side ortho renders
+   (0.9.0).
+9. Auto-fix retry loop for scripts that crash in Blender (traceback
+   fed back to the model, up to 2 repairs; bmesh.ops signatures pinned
+   in the prompts) — done (0.10.0, this release).
+10. Next: vision check of renders vs reference (six-side ortho renders
    compared by a vision model, revising only what missed).
-10. Optional: CadQuery executor for prismatic parts, local instant-mesh
+11. Optional: CadQuery executor for prismatic parts, local instant-mesh
    models (TripoSR), 3ds Max / Inventor bridges.

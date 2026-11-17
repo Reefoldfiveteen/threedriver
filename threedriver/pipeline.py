@@ -94,6 +94,17 @@ bbox must be in millimetres. hole_centers lists every through-hole centre \
 10. FORBIDDEN: network access, subprocess, shell commands, eval/exec, \
 writing outside --job-dir. The script is scanned and refused if it \
 contains them.
+11. BMESH PRIMITIVES: bmesh.ops parameter names are exact — never guess \
+them. The primitives you may use, with their real signatures (Blender \
+5.2): create_cube(size, matrix, calc_uvs); create_cone(cap_ends, \
+cap_tris, segments, radius1, radius2, depth, matrix, calc_uvs); \
+create_uvsphere(u_segments, v_segments, radius, matrix, calc_uvs); \
+create_icosphere(subdivisions, radius, matrix, calc_uvs); \
+create_circle(cap_ends, cap_tris, segments, radius, matrix, calc_uvs); \
+create_grid(x_segments, y_segments, size, matrix, calc_uvs). Note \
+cap_ends (plural) and cap_tris — NOT cap_end or cap_triangles. When in \
+doubt, build the mesh from vertices and faces directly (bmesh \
+verts/faces or from_pydata): that has no signature to get wrong.
 
 Reply with ONLY the Python code in one ```python fenced block, no prose."""
 
@@ -129,6 +140,70 @@ def extract_code(text: str) -> str:
     if "import bpy" in text:
         return text.strip()
     raise PipelineError("model reply contained no Blender Python script")
+
+
+MAX_CODE_BYTES = 100_000
+MAX_FIX_ATTEMPTS = 2
+
+FIX_SYSTEM = """You fix a Blender Python (bpy) script that FAILED when Blender ran it. \
+You are given the failed script and the exact error Blender reported \
+(usually a traceback naming the broken line and the wrong call).
+
+Rules:
+1. Return the COMPLETE corrected script — not a patch, not a fragment. \
+Change ONLY what the error requires; keep everything else (shape, \
+dimensions, structure) exactly as it was.
+2. Read the traceback literally: if it says a keyword is invalid for an \
+operator, use the operator's real parameter names (rule 4); if it says \
+an attribute does not exist, use the correct attribute.
+3. {CONTRACT}
+4. bmesh.ops parameter names are exact — never guess them. The \
+primitives you may use, with their real signatures (Blender 5.2): \
+create_cube(size, matrix, calc_uvs); create_cone(cap_ends, cap_tris, \
+segments, radius1, radius2, depth, matrix, calc_uvs); \
+create_uvsphere(u_segments, v_segments, radius, matrix, calc_uvs); \
+create_icosphere(subdivisions, radius, matrix, calc_uvs); \
+create_circle(cap_ends, cap_tris, segments, radius, matrix, calc_uvs); \
+create_grid(x_segments, y_segments, size, matrix, calc_uvs). Note \
+cap_ends (plural) and cap_tris — NOT cap_end or cap_triangles. When in \
+doubt, build the mesh from vertices and faces directly.
+5. Same bans as always: no booleans, no network, subprocess, shell \
+commands, eval/exec, no bpy.ops modelling calls.
+
+Do NOT explain the fix in prose. Reply with ONLY the Python code in one \
+```python fenced block."""
+
+
+def fix_script(provider, model: str, failed_script: str, error: str,
+               live: bool) -> str:
+    """Ask the model to repair a script that failed at execution.
+    Returns the corrected script (extracted + scanned). Raises
+    PipelineError when the reply has no code or the repair is refused
+    by the scan. Callers running live must additionally apply
+    check_mod_script (save/open guard) to the result."""
+    if live:
+        contract = ("The script runs inside a GUI Blender via the live "
+                    "addon: it takes NO arguments, writes NO files, and "
+                    "must not save or open files.")
+    else:
+        contract = ("The script runs headless with --job-dir and must "
+                    "write model.blend, model.stl, preview.png and "
+                    "report.json into the job dir.")
+    messages = [
+        text_msg("system", FIX_SYSTEM.replace("{CONTRACT}", contract)),
+        text_msg("user", "FAILED SCRIPT:\n```python\n" + failed_script +
+                 "\n```\n\nBLENDER ERROR:\n" + error),
+    ]
+    reply = provider.complete(messages, model=model, temperature=0.0,
+                              max_tokens=8192, json_mode=False)
+    code = extract_code(reply)
+    if len(code.encode("utf-8")) > MAX_CODE_BYTES:
+        raise PipelineError("repaired script larger than 100 KB")
+    findings = scan_text(code)
+    if findings:
+        detail = "; ".join(f"line {n}: {d}" for n, d in findings)
+        raise PipelineError(f"repaired script refused: {detail}")
+    return code
 
 
 def _find_blend(job_dir: Path) -> Path | None:
@@ -216,20 +291,38 @@ def run_pipeline(
             return fail("scan", f"generated script refused: {detail}",
                         {"spec": spec})
 
-        # 3. BUILD
-        stage("build")
-        result = run_job(
-            script_path, job_dir, job_id=job_id,
-            blender=blender_exe,
-            timeout=float(settings.get("timeout") or 600),
-            scan=False,  # already scanned above; scan once, not twice
-        )
-        if not result.ok:
+        # 3. BUILD, with auto-fix retries: when the script crashes in
+        # Blender (a wrong kwarg, a missing attribute), the traceback
+        # goes back to the model for a repair instead of failing the
+        # job outright. Timeouts are NOT retried — a fix prompt cannot
+        # cure a job that ran out of time.
+        attempts = 1
+        while True:
+            stage("build")
+            result = run_job(
+                script_path, job_dir, job_id=job_id,
+                blender=blender_exe,
+                timeout=float(settings.get("timeout") or 600),
+                scan=False,  # scanned above / in fix_script; scan once
+            )
+            if result.ok:
+                break
             tail = "\n".join(result.stdout_tail[-10:])
-            return fail("build",
-                        f"Blender exited {result.returncode} "
-                        f"(timed out: {result.timed_out}). Log tail:\n{tail}",
-                        {"spec": spec, "report": result.report})
+            error_text = (
+                f"Blender exited {result.returncode} "
+                f"(timed out: {result.timed_out}). Log tail:\n{tail}")
+            if result.timed_out or attempts > MAX_FIX_ATTEMPTS:
+                return fail("build", error_text,
+                            {"spec": spec, "report": result.report,
+                             "attempts": attempts})
+            stage("fix")
+            (job_dir / f"generated_attempt{attempts}.py").write_text(
+                code, encoding="utf-8")
+            code = fix_script(provider, model, code,
+                              "\n".join(result.stdout_tail[-30:]),
+                              live=False)
+            script_path.write_text(code, encoding="utf-8")
+            attempts += 1
         report = result.report or {}
 
         # 4. VERIFY
@@ -253,7 +346,8 @@ def run_pipeline(
         verified = bool(probe_report and probe_report.get("pass"))
         return {"job_id": job_id, "job_dir": str(job_dir), "status": "done",
                 "spec": spec, "report": report, "probe": probe_report,
-                "verified": verified, "files": files}
+                "verified": verified, "files": files,
+                "attempts": attempts}
     except BlenderNotFound as exc:
         return fail("build", str(exc))
     except ProviderError as exc:

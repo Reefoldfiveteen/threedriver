@@ -46,10 +46,13 @@ from .headless import (
 from .live_client import LiveClient, LiveError
 from .pipeline import (
     CODEGEN_SYSTEM,
+    MAX_CODE_BYTES,
+    MAX_FIX_ATTEMPTS,
     SPEC_SYSTEM,
     PipelineError,
     extract_code,
     extract_json,
+    fix_script,
 )
 from .providers import ProviderError, get_provider, text_msg
 from .providers.base import image_msg
@@ -102,12 +105,21 @@ what was done). Do not print long output.
 8. If the scene inventory is empty or holds only default objects \
 (Cube/Camera/Light), build the NEW spec's part in the current scene \
 from scratch, using the object name from the spec.
+9. BMESH PRIMITIVES: bmesh.ops parameter names are exact — never guess \
+them. The primitives you may use, with their real signatures (Blender \
+5.2): create_cube(size, matrix, calc_uvs); create_cone(cap_ends, \
+cap_tris, segments, radius1, radius2, depth, matrix, calc_uvs); \
+create_uvsphere(u_segments, v_segments, radius, matrix, calc_uvs); \
+create_icosphere(subdivisions, radius, matrix, calc_uvs); \
+create_circle(cap_ends, cap_tris, segments, radius, matrix, calc_uvs); \
+create_grid(x_segments, y_segments, size, matrix, calc_uvs). Note \
+cap_ends (plural) and cap_tris — NOT cap_end or cap_triangles. When in \
+doubt, build the mesh from vertices and faces directly.
 
 Reply with ONLY the Python code in one ```python fenced block, no prose."""
 
 MAX_IMAGES = 5
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
-MAX_CODE_BYTES = 100_000
 
 _lock = threading.Lock()
 
@@ -457,6 +469,36 @@ def _codegen_live_mod(provider, model: str, old_spec, spec: dict,
     return script
 
 
+def _live_mod_with_retries(provider, model: str, old_spec, spec: dict,
+                           inventory: dict, prompt: str, image_data,
+                           out_dir: Path, settings: dict,
+                           on_status) -> tuple[str, list[str], str, int]:
+    """First mod script + execute, with up to MAX_FIX_ATTEMPTS repairs
+    when execution fails in Blender. Returns
+    (script, files, note, attempts). Connection problems (LiveError)
+    are NOT retried — only execution errors reach the fix loop."""
+    script = _codegen_live_mod(provider, model, old_spec, spec, inventory,
+                               prompt, image_data)
+    script_path = out_dir / "generated.py"
+    script_path.write_text(script, encoding="utf-8")
+    attempts = 1
+    while True:
+        try:
+            files, note = _apply_live_direct(script, out_dir, settings,
+                                             on_status)
+            return script, files, note, attempts
+        except PipelineError as exc:
+            if attempts > MAX_FIX_ATTEMPTS:
+                raise
+            if on_status:
+                on_status("fix")
+            script = fix_script(provider, model, script, str(exc),
+                                live=True)
+            check_mod_script(script)
+            script_path.write_text(script, encoding="utf-8")
+            attempts += 1
+
+
 def run_live_build(*, prompt: str, images, settings: dict,
                    job_dir: str | Path, on_status=None) -> dict:
     """One-shot live build: spec -> inventory -> direct-mod script ->
@@ -484,11 +526,9 @@ def run_live_build(*, prompt: str, images, settings: dict,
     stage("inventory")
     inventory = _live_inventory(settings)
     stage("codegen")
-    script = _codegen_live_mod(provider, model, None, spec, inventory,
-                               prompt, image_data)
-    (job_dir / "generated.py").write_text(script, encoding="utf-8")
-
-    files, note = _apply_live_direct(script, job_dir, settings, stage)
+    script, files, note, attempts = _live_mod_with_retries(
+        provider, model, None, spec, inventory, prompt, image_data,
+        job_dir, settings, stage)
     report = {
         "job_dir": str(job_dir),
         "target": "live",
@@ -496,13 +536,14 @@ def run_live_build(*, prompt: str, images, settings: dict,
         "files": files,
         "verified": None,
         "note": note,
+        "attempts": attempts,
         "summary": _summarize(spec, "live", 1, None),
     }
     (job_dir / "report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8")
     return {"status": "done", "job_dir": str(job_dir), "target": "live",
             "report": report, "files": files, "verified": None,
-            "note": note}
+            "note": note, "attempts": attempts}
 
 
 def run_mod_turn(*, settings: dict, root: str | Path, chat_id: str,
@@ -585,16 +626,14 @@ def run_mod_turn(*, settings: dict, root: str | Path, chat_id: str,
         verified: bool | None = None
         note = ""
         report = None
+        attempts = 1
         if target == "live":
             stage("inventory")
             inventory = _live_inventory(settings)
             stage("codegen")
-            script = _codegen_live_mod(
+            script, files, note, attempts = _live_mod_with_retries(
                 provider, model, session.get("spec"), spec, inventory,
-                prompt, image_data)
-            (version_dir / "generated.py").write_text(script, encoding="utf-8")
-            files, note = _apply_live_direct(
-                script, version_dir, settings, stage)
+                prompt, image_data, version_dir, settings, stage)
         else:
             stage("codegen")
             code_reply = provider.complete(
@@ -611,9 +650,22 @@ def run_mod_turn(*, settings: dict, root: str | Path, chat_id: str,
                 detail = "; ".join(f"line {ln}: {d}" for ln, d in findings)
                 raise PipelineError(f"generated script refused: {detail}")
             (version_dir / "generated.py").write_text(script, encoding="utf-8")
-            report, verified, files = _apply_headless(
-                script, version_dir, job_id, settings, blender_exe,
-                timeout, stage)
+            script_path = version_dir / "generated.py"
+            attempts = 1
+            while True:
+                try:
+                    report, verified, files = _apply_headless(
+                        script, version_dir, job_id, settings, blender_exe,
+                        timeout, stage)
+                    break
+                except PipelineError as exc:
+                    if attempts > MAX_FIX_ATTEMPTS:
+                        raise
+                    stage("fix")
+                    script = fix_script(provider, model, script, str(exc),
+                                        live=False)
+                    script_path.write_text(script, encoding="utf-8")
+                    attempts += 1
         preview = None
         for candidate in ("preview.png", "viewport.png"):
             if candidate in files:
@@ -629,7 +681,7 @@ def run_mod_turn(*, settings: dict, root: str | Path, chat_id: str,
                 "mode": "direct" if target == "live" else "rebuild",
                 "dir": f"versions/v{n}",
                 "files": files, "verified": verified,
-                "preview": preview,
+                "preview": preview, "attempts": attempts,
             })
             if len(current["messages"]) <= 1 and not current.get("title_set"):
                 current["title"] = (prompt[:60] or "Chat mod")
@@ -639,6 +691,9 @@ def run_mod_turn(*, settings: dict, root: str | Path, chat_id: str,
         if target == "live":
             text += ("\nSudah tampil di viewport Blender yang terbuka — "
                      "tekan Ctrl+S di Blender untuk menyimpan file.")
+        if attempts > 1:
+            text += (f"\nScript awal gagal {attempts - 1}x di Blender dan "
+                     "diperbaiki otomatis dari errornya.")
         if note:
             text += "\n" + note
         return finish_ok({
