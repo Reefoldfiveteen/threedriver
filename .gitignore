@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+settings.json
 
 # Job outputs (isolated per job, regenerable).
 tmp/
