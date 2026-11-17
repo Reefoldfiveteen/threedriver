@@ -2,9 +2,12 @@
 
 Runs inside Blender (the addon imports bpy), against a tiny mock web UI
 in a thread. Covers: register/unregister + scene props, the default web
-base when prefs are missing, chat create (JSON body), chat send
-(urlencoded, target=live), fetch/apply, the poll timer stopping when the
-turn is done, and the clean error when the web UI is unreachable.
+base when prefs are missing, the chat chooser list (GET /api/chats, same
+shape as the browser), choosing a chat (update callback loads messages),
+chat create (JSON body), chat send (urlencoded, target=live), fetch/apply,
+the poll timer stopping when the turn is done, the friendly error when a
+chat was deleted in the browser (404), and the clean error when the web
+UI is unreachable.
 
 What this does NOT prove (needs the laptop GUI): the panel drawing, the
 operators firing from clicks, and the real web UI end to end.
@@ -41,7 +44,15 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/api/chats/chat-test":
+        if self.path == "/api/chats":
+            self._send({"chats": [
+                {"id": "chat-test", "title": "plat 100x60",
+                 "messages": 2, "versions": 1, "pending": False,
+                 "has_model": True, "created": 2},
+                {"id": "chat-old", "title": "kubus",
+                 "messages": 4, "versions": 2, "pending": False,
+                 "has_model": True, "created": 1}]})
+        elif self.path == "/api/chats/chat-test":
             self._send({"id": "chat-test", "pending": None, "messages": [
                 {"role": "user", "text": "halo"},
                 {"role": "assistant",
@@ -75,11 +86,25 @@ def main():
     base = f"http://127.0.0.1:{server.server_address[1]}"
     addon.register()
     try:
-        assert hasattr(bpy.types.Scene, "td_chat_id")
+        assert hasattr(bpy.types.Scene, "td_chat_choice")
         assert hasattr(bpy.types.Scene, "td_chat_input")
-        print("scene props ok")
+        assert not hasattr(bpy.types.Scene, "td_chat_id")
+        print("scene props ok (chooser enum, no more id text field)")
         assert addon._web_base() == addon.DEFAULT_WEB_URL
         print("web base default ok:", addon._web_base())
+        assert addon._chat_refresh_list(base) == 2
+        items = addon._chat_state["chat_list"]
+        assert len(items) == 3 and items[0][0] == "", items
+        assert items[1][0] == "chat-test", items
+        assert "plat 100x60" in items[1][1] and "1 v, 2 pesan" in items[1][1], items
+        assert addon._chat_choice_items(None, None) == items
+        print("chat chooser list ok (same shape as browser)")
+        addon._chat_state["web_base"] = base
+        bpy.context.scene.td_chat_choice = "chat-test"
+        assert addon._chat_state["chat_id"] == "chat-test"
+        assert len(addon._chat_state["messages"]) == 2
+        assert "dimuat" in addon._chat_state["status"], addon._chat_state
+        print("chooser update loads messages ok")
         created = addon._chat_http(base, "POST", "/api/chats", json_data={})
         assert created["id"] == "chat-test", created
         assert "application/json" in seen["create_ct"], seen
@@ -104,6 +129,20 @@ def main():
         assert addon._chat_state["status"] == "selesai"
         print("chat poll ok (pending None -> stop)")
         try:
+            addon._chat_fetch(base, "chat-gone")
+        except addon.ChatWebError as exc:
+            assert "sudah dihapus" in str(exc), exc
+            print("deleted chat -> friendly 404 message ok")
+        else:
+            raise AssertionError("deleted chat did not raise")
+        addon._chat_state["chat_id"] = "chat-gone"
+        addon._chat_state["messages"] = [{"role": "user", "text": "old"}]
+        addon._chat_state["polling"] = True
+        assert addon._chat_poll() is None
+        assert addon._chat_state["polling"] is False
+        assert addon._chat_state["messages"] == []
+        print("poll on deleted chat clears the log ok")
+        try:
             addon._chat_http("http://127.0.0.1:9", "GET", "/api/health",
                              timeout=3)
         except addon.ChatWebError as exc:
@@ -114,7 +153,7 @@ def main():
     finally:
         addon.unregister()
         server.shutdown()
-    assert not hasattr(bpy.types.Scene, "td_chat_id")
+    assert not hasattr(bpy.types.Scene, "td_chat_choice")
     print("unregister ok")
     print("ADDON CHAT TEST PASSED")
 

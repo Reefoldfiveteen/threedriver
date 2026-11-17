@@ -30,6 +30,8 @@ from . import __version__
 from .chat import (
     chats_root,
     create_session,
+    delete_all_sessions,
+    delete_session,
     list_sessions,
     load_session,
     run_live_build,
@@ -345,10 +347,23 @@ def list_chats() -> dict:
     return {"chats": list_sessions(chats_root(load_settings()))}
 
 
+@app.delete("/api/chats")
+def delete_all_chats() -> dict:
+    count = delete_all_sessions(chats_root(load_settings()))
+    return {"ok": True, "deleted": count}
+
+
 @app.get("/api/chats/{chat_id}")
 def get_chat(chat_id: str) -> dict:
     session, _root = _get_session_or_404(chat_id)
     return session
+
+
+@app.delete("/api/chats/{chat_id}")
+def delete_chat(chat_id: str) -> dict:
+    _session, root = _get_session_or_404(chat_id)
+    delete_session(root, chat_id)
+    return {"ok": True, "deleted": chat_id}
 
 
 @app.post("/api/chats/{chat_id}/messages")

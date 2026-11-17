@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -210,6 +211,31 @@ def list_sessions(root: str | Path) -> list[dict]:
                 "has_model": data.get("spec") is not None,
             })
     return sorted(out, key=lambda s: s["created"], reverse=True)
+
+
+def delete_session(root: str | Path, chat_id: str) -> bool:
+    """Delete one session directory (history + versions + uploads).
+    Returns True when something was deleted. Raises ValueError on a
+    bad id (same guard as load)."""
+    path = _session_dir(root, chat_id)
+    if not path.is_dir():
+        return False
+    shutil.rmtree(path)
+    return True
+
+
+def delete_all_sessions(root: str | Path) -> int:
+    """Delete every session directory under root. Only directories that
+    contain a session.json are touched. Returns the number deleted."""
+    root = Path(root)
+    count = 0
+    if not root.is_dir():
+        return 0
+    for path in root.iterdir():
+        if path.is_dir() and (path / "session.json").is_file():
+            shutil.rmtree(path)
+            count += 1
+    return count
 
 
 def _version_dir(root: str | Path, session: dict, n: int) -> Path:
@@ -630,6 +656,8 @@ __all__ = [
     "chats_root",
     "check_mod_script",
     "create_session",
+    "delete_all_sessions",
+    "delete_session",
     "load_session",
     "save_session",
     "list_sessions",

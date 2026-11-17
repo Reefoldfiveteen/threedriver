@@ -66,6 +66,12 @@ def main() -> int:
             assert any(p["id"] == "stub" for p in providers), "stub missing"
             print("providers ok:", [p["id"] for p in providers])
 
+            page = client.get(f"{BASE}/").text
+            for marker in ("deleteChatBtn", "deleteAllChatsBtn", "chatCount",
+                           "jobLive", "livePanel"):
+                assert marker in page, marker
+            print("page contains delete controls + merged-tab ids")
+
             saved = client.post(f"{BASE}/api/settings",
                                 json={"provider": "stub"}).json()
             assert saved["provider"] == "stub", saved

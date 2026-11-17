@@ -76,6 +76,24 @@ def main() -> int:
         raise AssertionError("save_as_mainfile was not refused")
     print("mod-script guard ok")
 
+    import tempfile
+    from threedriver.chat import delete_all_sessions, delete_session
+    with tempfile.TemporaryDirectory() as tmp:
+        troot = Path(tmp)
+        (troot / "chat-a").mkdir()
+        (troot / "chat-a" / "session.json").write_text("{}")
+        (troot / "chat-b").mkdir()
+        (troot / "chat-b" / "session.json").write_text("{}")
+        (troot / "other").mkdir()
+        (troot / "other" / "notes.txt").write_text("keep")
+        assert delete_session(troot, "chat-a") is True
+        assert not (troot / "chat-a").exists()
+        assert delete_session(troot, "chat-a") is False
+        assert delete_all_sessions(troot) == 1
+        assert not (troot / "chat-b").exists()
+        assert (troot / "other" / "notes.txt").is_file()
+    print("delete helpers ok")
+
     settings_path = ROOT / "tmp" / "smoke-chat-settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     if settings_path.exists():
@@ -282,6 +300,17 @@ def main() -> int:
             assert not any(f.endswith(".blend")
                            for f in job["result"]["files"]), job
             print("one-shot live job ok:", live_job_id)
+
+            # Delete this chat via the API; unknown id -> 404. Delete-all
+            # is covered as a unit check above (never wipe the shared
+            # chats dir from a smoke test).
+            resp = client.delete(f"{BASE}/api/chats/{chat_id}")
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["deleted"] == chat_id
+            assert client.get(f"{BASE}/api/chats/{chat_id}").status_code == 404
+            resp = client.delete(f"{BASE}/api/chats/chat-tidak-ada")
+            assert resp.status_code == 404, resp.text
+            print("chat delete ok (single + unknown -> 404)")
 
         # The stub mod script scaled the live Cube x2 in place: prove the
         # open scene itself changed, not a new file.

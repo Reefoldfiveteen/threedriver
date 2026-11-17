@@ -32,12 +32,14 @@ UI's chat API (same endpoints the browser uses), so live modification
 works without opening a browser. The brain stays in the web app — it runs
 the LLM calls and drives this Blender back through the socket above.
 Blender's Python has no httpx, so the chat client uses urllib (stdlib).
+The panel's chat chooser lists the same sessions as the browser
+(GET /api/chats); deleting chat history happens in the browser.
 """
 
 bl_info = {
     "name": "3Driver Live",
     "author": "Reefoldfiveteen",
-    "version": (0, 4, 0),
+    "version": (0, 5, 0),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > 3Driver",
     "description": "Local socket server so 3Driver can drive this Blender "
@@ -487,6 +489,7 @@ _chat_state = {
     "status": "",
     "polling": False,
     "web_base": None,
+    "chat_list": [],  # enum items for the chooser, from GET /api/chats
 }
 
 
@@ -524,9 +527,12 @@ def _chat_http(base: str, method: str, path: str, data=None,
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        raise ChatWebError(
-            f"web UI menjawab HTTP {exc.code}: "
-            f"{exc.read().decode('utf-8', 'replace')[:200]}")
+        body = exc.read().decode("utf-8", "replace")[:200]
+        if exc.code == 404 and path.startswith("/api/chats"):
+            raise ChatWebError(
+                "chat tidak ditemukan di web UI (mungkin sudah dihapus "
+                "dari browser — pencet Refresh daftar)")
+        raise ChatWebError(f"web UI menjawab HTTP {exc.code}: {body}")
     except urllib.error.URLError as exc:
         raise ChatWebError(
             "web UI tidak terjangkau di " + base +
@@ -545,6 +551,52 @@ def _chat_http(base: str, method: str, path: str, data=None,
 
 def _chat_fetch(base: str, chat_id: str) -> dict:
     return _chat_http(base, "GET", f"/api/chats/{chat_id}")
+
+
+def _chat_refresh_list(base: str) -> int:
+    """Fetch GET /api/chats and rebuild the chooser items — the same
+    list the browser shows, newest first. Returns the number of chats.
+    Raises ChatWebError."""
+    data = _chat_http(base, "GET", "/api/chats")
+    chats = data.get("chats") or []
+    items = [("", "(pilih chat…)", "")]
+    for c in chats:
+        cid = c.get("id", "")
+        if not cid:
+            continue
+        title = (c.get("title") or cid)[:40]
+        label = (f"{title} ({c.get('versions', 0)} v, "
+                 f"{c.get('messages', 0)} pesan)")
+        items.append((cid, label, cid))
+    _chat_state["chat_list"] = items
+    return len(chats)
+
+
+def _chat_choice_items(self, context):
+    """Enum items callback: returns the cached list. Never touches the
+    network here — drawing must stay fast; Refresh rebuilds the cache."""
+    items = _chat_state.get("chat_list") or []
+    if not items:
+        return [("", "(belum ada chat — pencet Refresh daftar)", "")]
+    return items
+
+
+def _on_chat_choice(self, context):
+    """Load the chosen chat's messages when the chooser changes."""
+    chat_id = (self.td_chat_choice or "").strip()
+    if not chat_id:
+        _chat_state["messages"] = []
+        _chat_state["chat_id"] = None
+        return
+    base = _chat_state.get("web_base") or _web_base()
+    try:
+        session = _chat_fetch(base, chat_id)
+    except ChatWebError as exc:
+        _chat_state["status"] = str(exc)
+        return
+    _chat_state["web_base"] = base
+    _chat_apply_session(session)
+    _chat_state["status"] = f"chat dimuat: {chat_id}"
 
 
 def _chat_apply_session(session: dict) -> None:
@@ -581,6 +633,8 @@ def _chat_poll() -> float | None:
         session = _chat_fetch(base, chat_id)
     except ChatWebError as exc:
         _chat_state["status"] = str(exc)
+        if "sudah dihapus" in str(exc):
+            _chat_state["messages"] = []
         _chat_state["polling"] = False
         _chat_redraw()
         return None
@@ -685,38 +739,36 @@ class THREEDRIVER_OT_chat_new(bpy.types.Operator):
         base = _web_base()
         try:
             created = _chat_http(base, "POST", "/api/chats", json_data={})
-            session = _chat_fetch(base, created["id"])
+            _chat_refresh_list(base)
         except (ChatWebError, KeyError) as exc:
             self.report({"ERROR"}, str(exc))
             _chat_state["status"] = str(exc)
             return {"CANCELLED"}
         _chat_state["web_base"] = base
-        _chat_apply_session(session)
-        context.scene.td_chat_id = session["id"]
-        _chat_state["status"] = f"chat baru: {session['id']}"
+        context.scene.td_chat_choice = created["id"]
+        _chat_state["status"] = f"chat baru: {created['id']}"
         return {"FINISHED"}
 
 
-class THREEDRIVER_OT_chat_load(bpy.types.Operator):
-    bl_idname = "threedriver.chat_load"
-    bl_label = "Muat Chat Live"
-    bl_description = "Muat chat live dari web UI berdasarkan ID"
+class THREEDRIVER_OT_chat_refresh_list(bpy.types.Operator):
+    bl_idname = "threedriver.chat_refresh_list"
+    bl_label = "Refresh Daftar Chat"
+    bl_description = "Muat ulang daftar chat dari web UI (sama dengan di browser)"
 
     def execute(self, context):
-        chat_id = (context.scene.td_chat_id or "").strip()
-        if not chat_id:
-            self.report({"ERROR"}, "ID chat masih kosong")
-            return {"CANCELLED"}
         base = _web_base()
         try:
-            session = _chat_fetch(base, chat_id)
+            count = _chat_refresh_list(base)
         except ChatWebError as exc:
             self.report({"ERROR"}, str(exc))
             _chat_state["status"] = str(exc)
             return {"CANCELLED"}
         _chat_state["web_base"] = base
-        _chat_apply_session(session)
-        _chat_state["status"] = f"chat dimuat: {chat_id}"
+        ids = {item[0] for item in _chat_state["chat_list"]}
+        if context.scene.td_chat_choice not in ids:
+            context.scene.td_chat_choice = ""
+        _chat_state["status"] = f"{count} chat dimuat"
+        _chat_redraw()
         return {"FINISHED"}
 
 
@@ -735,12 +787,13 @@ class THREEDRIVER_OT_chat_send(bpy.types.Operator):
             self.report({"WARNING"}, "Masih menunggu giliran sebelumnya")
             return {"CANCELLED"}
         base = _web_base()
-        chat_id = (scene.td_chat_id or "").strip()
+        chat_id = (scene.td_chat_choice or "").strip()
         try:
             if not chat_id:
                 created = _chat_http(base, "POST", "/api/chats", json_data={})
                 chat_id = created["id"]
-                scene.td_chat_id = chat_id
+                _chat_refresh_list(base)
+                scene.td_chat_choice = chat_id
             _chat_http(base, "POST", f"/api/chats/{chat_id}/messages",
                        data={"text": text, "target": "live"})
             session = _chat_fetch(base, chat_id)
@@ -764,9 +817,9 @@ class THREEDRIVER_OT_chat_refresh(bpy.types.Operator):
     bl_description = "Muat ulang pesan chat live dari web UI"
 
     def execute(self, context):
-        chat_id = (context.scene.td_chat_id or "").strip()
+        chat_id = (context.scene.td_chat_choice or "").strip()
         if not chat_id:
-            self.report({"ERROR"}, "Belum ada chat — pencet Chat baru dulu")
+            self.report({"ERROR"}, "Belum ada chat yang dipilih")
             return {"CANCELLED"}
         try:
             session = _chat_fetch(_web_base(), chat_id)
@@ -791,8 +844,8 @@ class THREEDRIVER_PT_chat(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
         row = layout.row()
-        row.prop(scene, "td_chat_id", text="ID chat")
-        row.operator("threedriver.chat_load", text="Muat")
+        row.prop(scene, "td_chat_choice", text="Chat")
+        row.operator("threedriver.chat_refresh_list", text="Refresh daftar")
         layout.operator("threedriver.chat_new", text="Chat baru")
         for msg in _chat_state.get("messages", []):
             who = "Anda" if msg["role"] == "user" else "3Driver"
@@ -803,18 +856,19 @@ class THREEDRIVER_PT_chat(bpy.types.Panel):
         row = layout.row()
         row.enabled = not _chat_state.get("polling")
         row.operator("threedriver.chat_send", text="Kirim (Live)")
-        layout.operator("threedriver.chat_refresh", text="Refresh")
+        layout.operator("threedriver.chat_refresh", text="Refresh pesan")
         status = _chat_state.get("status") or ""
         if status:
             layout.label(text=status)
         layout.label(text="Mengubah file yang terbuka, langsung.")
-        layout.label(text="Butuh server web (start-windows.bat).")
+        layout.label(text="Daftar chat sama dengan di browser.")
+        layout.label(text="Hapus history chat dari browser (Pengaturan).")
         layout.label(text="Upload gambar tetap lewat browser.")
 
 
 _CLASSES = (ThreedriverLivePreferences, THREEDRIVER_OT_start_server,
             THREEDRIVER_OT_stop_server, THREEDRIVER_PT_panel,
-            THREEDRIVER_OT_chat_new, THREEDRIVER_OT_chat_load,
+            THREEDRIVER_OT_chat_new, THREEDRIVER_OT_chat_refresh_list,
             THREEDRIVER_OT_chat_send, THREEDRIVER_OT_chat_refresh,
             THREEDRIVER_PT_chat)
 
@@ -822,9 +876,9 @@ _CLASSES = (ThreedriverLivePreferences, THREEDRIVER_OT_start_server,
 def register():
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
-    bpy.types.Scene.td_chat_id = bpy.props.StringProperty(
-        name="ID chat", default="",
-        description="ID chat live di web UI (kosong = buat baru saat kirim)")
+    bpy.types.Scene.td_chat_choice = bpy.props.EnumProperty(
+        name="Chat", items=_chat_choice_items, update=_on_chat_choice,
+        description="Pilih chat live (daftar sama dengan di browser)")
     bpy.types.Scene.td_chat_input = bpy.props.StringProperty(
         name="Pesan", default="",
         description="Pesan untuk chat live")
@@ -839,7 +893,7 @@ def unregister():
         pass
     for cls in reversed(_CLASSES):
         bpy.utils.unregister_class(cls)
-    for prop in ("td_chat_id", "td_chat_input"):
+    for prop in ("td_chat_choice", "td_chat_input"):
         if hasattr(bpy.types.Scene, prop):
             delattr(bpy.types.Scene, prop)
 

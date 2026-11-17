@@ -6,7 +6,7 @@ or live — and hands back a `.blend`, exports, a preview render, and a
 measurement report. The name means "the thing that drives Blender", not a
 hardware driver.
 
-Status: **Chat mod with live direct modification + addon Live Chat (0.8.0), plus model-list fetch in Settings.** Pick a provider on the Settings page,
+Status: **Chat mod with shared chooser + delete history (0.9.0), plus model-list fetch in Settings.** Pick a provider on the Settings page,
 type a prompt, get a verified model — or drive the Blender already open on
 your screen and watch the viewport change. The CAD bridges come next. See
 `RESEARCH-HYBRID.md` for the full design (in Indonesian).
@@ -189,9 +189,22 @@ The same live chat also lives INSIDE Blender (addon 0.4.0+): the
 N-panel > 3Driver tab has a **Live Chat** panel — type a message, press
 Kirim, and the turn runs with the live target, no browser needed. It is
 a thin client for the web UI's chat API (same sessions the browser
-shows; paste a chat ID to resume one), so the web server
-(`start-windows.bat`) must be running. Text only for now — reference
-image uploads stay in the browser.
+shows), so the web server (`start-windows.bat`) must be running. Text
+only for now — reference image uploads stay in the browser.
+
+The chat chooser is shared (addon 0.5.0+): the panel's dropdown lists
+exactly the sessions `GET /api/chats` returns — the same list, labels,
+and order as the browser's dropdown — refreshed with the Refresh daftar
+button. Picking a chat loads its messages; a chat deleted in the
+browser shows a plain "sudah dihapus" note in the panel instead of a
+raw error.
+
+Deleting history: **Hapus chat ini** in the Chat mod card deletes the
+selected chat (with a confirm dialog), and **Hapus semua history chat**
+in Settings > History chat deletes every session. Both remove the
+session directories under `tmp/chats/` (messages, versions, uploads) —
+there is no undo. The API is `DELETE /api/chats/{id}` and
+`DELETE /api/chats`.
 
 ## Job contract
 
@@ -286,8 +299,11 @@ RESEARCH-HYBRID.md    architecture, contracts, POC plan (Indonesian)
    + viewport screenshot context-override fix (addon 0.3.0) — done
    (0.7.0).
 7. Merged Buat model tab (Live checkbox instead of a separate tab) +
-   addon Live Chat panel (addon 0.4.0) — done (0.8.0, this release).
-8. Next: vision check of renders vs reference (six-side ortho renders
+   addon Live Chat panel (addon 0.4.0) — done (0.8.0).
+8. Shared chat chooser (browser + addon, same list) + delete chat
+   history (per-chat + delete-all in Settings, addon 0.5.0) — done
+   (0.9.0, this release).
+9. Next: vision check of renders vs reference (six-side ortho renders
    compared by a vision model, revising only what missed).
-9. Optional: CadQuery executor for prismatic parts, local instant-mesh
+10. Optional: CadQuery executor for prismatic parts, local instant-mesh
    models (TripoSR), 3ds Max / Inventor bridges.
