@@ -26,6 +26,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
+from . import __version__
 from .chat import (
     chats_root,
     create_session,
@@ -108,7 +109,7 @@ def _run_job_thread(job_id: str, prompt: str, images, settings: dict) -> None:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True}
+    return {"ok": True, "version": __version__}
 
 
 @app.get("/api/providers")

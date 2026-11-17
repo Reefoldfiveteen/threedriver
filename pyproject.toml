@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "threedriver"
-version = "0.6.0"
+version = "0.6.1"
 description = "AI-driven 3D modelling: LLM-written Blender Python, executed headless or live."
 readme = "README.md"
 requires-python = ">=3.10"

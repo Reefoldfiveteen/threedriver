@@ -45,7 +45,7 @@
 </style>
 </head>
 <body>
-<header><h1>3Driver</h1><p>Prompt + gambar &rarr; script Blender &rarr; model 3D. Lokal saja, di mesin ini.</p></header>
+<header><h1>3Driver</h1><p>Prompt + gambar &rarr; script Blender &rarr; model 3D. Lokal saja, di mesin ini.<span id="appVersion"></span></p></header>
 <main>
 
 <div class="card">
@@ -481,6 +481,7 @@ refreshJobs();
 refreshLive();
 refreshBlenderDetection();
 loadChats();
+fetch('/api/health').then(r => r.json()).then(d => { if (d.version) $('appVersion').textContent = ' · v' + d.version; }).catch(() => {});
 setInterval(refreshJobs, 2500);
 </script>
 </body>
