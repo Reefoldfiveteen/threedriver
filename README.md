@@ -6,10 +6,10 @@ or live — and hands back a `.blend`, exports, a preview render, and a
 measurement report. The name means "the thing that drives Blender", not a
 hardware driver.
 
-Status: **POC-2 — provider wiring + local web UI.** Pick a provider on the
-Settings page, type a prompt, get a verified model. The live addon and CAD
-bridges come next. See `RESEARCH-HYBRID.md` for the full design
-(in Indonesian).
+Status: **POC-3 — live addon.** Pick a provider on the Settings page,
+type a prompt, get a verified model — or drive the Blender already open on
+your screen and watch the viewport change. The CAD bridges come next. See
+`RESEARCH-HYBRID.md` for the full design (in Indonesian).
 
 ## How it works
 
@@ -82,6 +82,52 @@ routers actually return — SSE `data:` lines with a `[DONE]` terminator,
 concatenated JSON, delta chunks, and HTTP 200 with an empty body (treated
 as an error, with a hint to try another model).
 
+## Live mode (POC-3): drive an open Blender
+
+The headless executor builds in a fresh process. Live mode drives the
+Blender already open on your screen, so you watch the viewport change.
+Small nudges and interactive iteration go live; heavy builds stay headless.
+
+Install once on the laptop:
+
+```bash
+python scripts/package_addon.py   # makes tmp/threedriver_live.zip
+```
+
+In Blender: Edit > Preferences > Add-ons > Install from Disk, pick the
+.zip, enable "3Driver Live". Open the N-panel (N key) > 3Driver tab >
+Start Server. The server binds 127.0.0.1:9877 and creates a secret token
+at `~/.threedriver/live_token` (shared with the client tools on the same
+machine; never commit or share it).
+
+Drive it from a terminal:
+
+```bash
+python scripts/live_cmd.py ping
+python scripts/live_cmd.py scene
+python scripts/live_cmd.py exec my_nudge.py
+python scripts/live_cmd.py shot C:\Users\you\view.png
+python scripts/live_cmd.py shutdown
+```
+
+Hard rules (enforced by the addon, not by convention):
+
+* `bpy` is not thread-safe: the socket thread only receives/parses JSON;
+  every command executes on Blender's main thread via a `bpy.app.timers`
+  pump.
+* Localhost + token only. No token, no execution.
+* Every `execute_code` saves the file and writes a timestamped backup copy
+  (`.3driver-backup-<time>.blend`) before running. Save the file first —
+  unsaved files get a warning instead of a backup.
+* Stop the server when done. Opening another .blend mid-session can cancel
+  the pump: restart the server afterwards.
+
+Tested headless here (`scripts/test_live_headless.py`: ping, execute,
+scene, error isolation, bad-token rejection, backup file, CLI, clean
+shutdown). Two things only the laptop GUI can prove: the timer pump firing
+under the real event loop, and viewport screenshots — try `live_cmd.py
+shot` once on the laptop and confirm the PNG shows the viewport.
+
 ## Job contract
 
 * Invocation is always an argument list with `shell=False`:
@@ -137,20 +183,28 @@ threedriver/
   webapp.py           FastAPI app: settings, jobs, file downloads
   web/index.html      the UI (single page, no build step)
   providers/          stub, OpenAI-compatible, Gemini clients
+  live_client.py      client for the live addon socket (localhost + token)
   bpy/probe.py        re-probes a saved .blend in a fresh Blender process
+  bpy/live_test_driver.py  headless driver for the live addon test
 examples/             bpy scripts (the shape LLM output takes)
 scripts/
   run_job.py          CLI: run one bpy script, optionally verify it
   run_prompt.py       CLI: run the full prompt pipeline
   serve.py            CLI: start the web UI
   smoke_web.py        end-to-end web UI smoke test (stub provider)
+  live_cmd.py         CLI: talk to a running live Blender
+  test_live_headless.py  end-to-end live addon test (headless Blender)
+  package_addon.py    zip the live addon for Blender Install from Disk
+addons/threedriver_live/  Blender addon: localhost socket server (live mode)
 RESEARCH-HYBRID.md    architecture, contracts, POC plan (Indonesian)
 ```
 
 ## Roadmap
 
 1. POC-1 headless executor — done.
-2. POC-2 provider wiring + local web UI — this release.
-3. POC-3 live socket addon for the laptop: watch the viewport change.
-4. Optional: CadQuery executor for prismatic parts, local instant-mesh
+2. POC-2 provider wiring + local web UI — done.
+3. POC-3 live socket addon — done (this release).
+4. Next: web UI live tab (drive the open Blender from the browser),
+   revision loop (vision check + fix only what missed).
+5. Optional: CadQuery executor for prismatic parts, local instant-mesh
    models (TripoSR), 3ds Max / Inventor bridges.
