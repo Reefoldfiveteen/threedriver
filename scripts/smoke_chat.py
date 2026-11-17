@@ -258,6 +258,31 @@ def main() -> int:
             print("live direct-mod turn ok (no new .blend, "
                   "screenshot note kept)")
 
+            # One-shot live job (Buat model + checkbox Live): same direct
+            # modification, no chat session.
+            resp = client.post(f"{BASE}/api/jobs",
+                               data={"prompt": "x", "target": "bogus"})
+            assert resp.status_code == 400, resp.text
+            print("bad job target -> 400")
+            resp = client.post(f"{BASE}/api/jobs",
+                               data={"prompt": "plat 100x60x10",
+                                     "target": "live"}, timeout=30)
+            assert resp.status_code == 200, resp.text
+            live_job_id = resp.json()["job_id"]
+            deadline = time.time() + 60
+            while True:
+                job = client.get(f"{BASE}/api/jobs/{live_job_id}").json()
+                if job["status"] in ("done", "error"):
+                    break
+                assert time.time() < deadline, job
+                time.sleep(0.5)
+            assert job["status"] == "done", job
+            assert job["target"] == "live", job
+            assert "generated.py" in job["result"]["files"], job
+            assert not any(f.endswith(".blend")
+                           for f in job["result"]["files"]), job
+            print("one-shot live job ok:", live_job_id)
+
         # The stub mod script scaled the live Cube x2 in place: prove the
         # open scene itself changed, not a new file.
         with LiveClient(port=LIVE_PORT, token=TEST_TOKEN,

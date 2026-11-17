@@ -90,8 +90,7 @@
 </div>
 
 <nav class="tabs">
-  <button class="tab active" data-tab="tab-make">Buat model (headless)</button>
-  <button class="tab" data-tab="tab-live">Live viewport</button>
+  <button class="tab active" data-tab="tab-make">Buat model</button>
   <button class="tab" data-tab="tab-chat">Chat mod</button>
 </nav>
 
@@ -102,20 +101,16 @@
   <textarea id="prompt" placeholder="Contoh: plat datar 100x60x10 mm dengan 4 lubang tembus diameter 10 mm di sudut-sudutnya"></textarea>
   <label for="images">Gambar referensi (opsional, maks 5, @ maks 10 MB)</label>
   <input type="file" id="images" accept="image/*" multiple>
+  <label><input type="checkbox" id="jobLive"> Pakai Live Blender yang terbuka — model langsung diubah di file yang kebuka (tanpa file baru)</label>
+  <div class="hint">Kalau dicentang, job-nya jalan di Blender yang sedang terbuka lewat addon (addon save + backup dulu, tekan Ctrl+S di Blender untuk menyimpan). Kalau tidak dicentang, job jalan headless di proses baru dan hasilnya file baru yang terverifikasi.</div>
   <button id="runBtn">Jalankan</button>
   <div id="jobMsg" class="msg"></div>
 </div>
 
-<div class="card">
-  <h2>Jobs</h2>
-  <div id="jobs"><p class="hint">Belum ada job. Job yang sedang jalan tampil di sini.</p></div>
-</div>
-</section>
-
-<section id="tab-live" hidden>
+<div id="livePanel" hidden>
 <div class="card">
   <h2>Live Blender — viewport &amp; kontrol</h2>
-  <div class="hint">Supaya ini jalan, Blender harus kebuka dan servernya nyala: di Blender, N-panel &gt; tab 3Driver &gt; Start Server. Kode yang dijalankan dari sini selalu didahului save + backup .blend oleh addon. Tombol shading butuh addon 0.2.0+ (install ulang .zip terbaru kalau gagal).</div>
+  <div class="hint">Supaya ini jalan, Blender harus kebuka dan servernya nyala: di Blender, N-panel &gt; tab 3Driver &gt; Start Server. Kode yang dijalankan dari sini selalu didahului save + backup .blend oleh addon. Tombol shading dan screenshot butuh addon terbaru (install ulang .zip kalau ada yang gagal).</div>
   <div id="liveStatus" style="margin-top:10px;font-size:13px;">Status live belum dicek.</div>
   <button id="liveRefreshBtn" class="secondary">Refresh status</button>
   <button id="liveShotBtn" class="secondary">Ambil screenshot viewport</button>
@@ -128,6 +123,12 @@
   <button id="liveExecBtn">Jalankan kode di live Blender</button>
   <pre id="liveOut" style="display:none"></pre>
   <div id="liveMsg" class="msg"></div>
+</div>
+</div>
+
+<div class="card">
+  <h2>Jobs</h2>
+  <div id="jobs"><p class="hint">Belum ada job. Job yang sedang jalan tampil di sini.</p></div>
 </div>
 </section>
 
@@ -167,6 +168,7 @@ function showMsg(el, text, ok) {
 
 /* ---- tabs ---- */
 function showTab(id) {
+  if (!document.getElementById(id)) id = 'tab-make';
   for (const sec of document.querySelectorAll('main > section')) sec.hidden = sec.id !== id;
   for (const b of document.querySelectorAll('.tab')) b.classList.toggle('active', b.dataset.tab === id);
   try { localStorage.setItem('td-tab', id); } catch (e) {}
@@ -289,11 +291,16 @@ $('testBlenderBtn').addEventListener('click', async () => {
 });
 
 /* ---- one-shot jobs ---- */
+$('jobLive').addEventListener('change', () => {
+  $('livePanel').hidden = !$('jobLive').checked;
+  if ($('jobLive').checked) refreshLive();
+});
 $('runBtn').addEventListener('click', async () => {
   const prompt = $('prompt').value.trim();
   if (!prompt) { showMsg($('jobMsg'), 'Prompt masih kosong.', false); return; }
   const fd = new FormData();
   fd.append('prompt', prompt);
+  fd.append('target', $('jobLive').checked ? 'live' : 'headless');
   for (const f of $('images').files) fd.append('images', f);
   $('runBtn').disabled = true;
   const res = await fetch('/api/jobs', { method: 'POST', body: fd });
@@ -315,12 +322,15 @@ function renderJobs(jobs) {
   $('jobs').innerHTML = jobs.map(j => {
     const r = j.result || {};
     const verified = r.verified ? ' · terverifikasi dari file .blend' : '';
-    const preview = (r.files || []).includes('preview.png')
-      ? `<img src="/api/jobs/${j.job_id}/files/preview.png" alt="preview">` : '';
+    const previewFile = (r.files || []).includes('preview.png') ? 'preview.png'
+      : (r.files || []).includes('viewport.png') ? 'viewport.png' : null;
+    const preview = previewFile
+      ? `<img src="/api/jobs/${j.job_id}/files/${previewFile}" alt="preview">` : '';
     const report = r.report ? `<details><summary>Laporan ukuran (report.json)</summary><pre>${JSON.stringify(r.report, null, 2)}</pre></details>` : '';
     const err = j.error ? `<pre>${escapeHtml(j.error)}</pre>` : '';
+    const target = j.target ? ' · ' + j.target : '';
     return `<div class="job"><span class="badge ${j.status}">${j.status}</span> <strong>${escapeHtml(j.prompt)}</strong>
-      <div class="hint">${j.job_id} · ${j.provider || ''} ${j.model || ''}${verified}</div>
+      <div class="hint">${j.job_id} · ${j.provider || ''} ${j.model || ''}${target}${verified}</div>
       ${preview}<div style="margin-top:6px">${fileLinks(j)}</div>${report}${err}</div>`;
   }).join('');
   const done = jobs.filter(j => j.status === 'done');

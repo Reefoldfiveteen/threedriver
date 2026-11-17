@@ -5,10 +5,10 @@ never in a request thread (see the headless contract in README.md); the UI
 polls job status. Job state is in-memory; job outputs live on disk under
 tmp/jobs/<job_id>/ and survive a server restart.
 
-The Live tab talks to the 3Driver Live addon in an open Blender (status,
-viewport screenshot, viewport shading, execute code) over localhost +
-token. A stopped live server is a normal state: live endpoints report
-ok:false, never crash.
+The Buat model tab's Live checkbox sends one-shot builds to the
+3Driver Live addon in an open Blender (status, viewport screenshot,
+viewport shading, execute code) over localhost + token. A stopped live
+server is a normal state: live endpoints report ok:false, never crash.
 
 Chat-mod sessions (see chat.py) revise one model across follow-up turns;
 turns also run in worker threads and the UI polls the session.
@@ -32,6 +32,7 @@ from .chat import (
     create_session,
     list_sessions,
     load_session,
+    run_live_build,
     run_mod_turn,
     save_session,
 )
@@ -88,15 +89,22 @@ def _live_shot_path() -> Path:
     return shot
 
 
-def _run_job_thread(job_id: str, prompt: str, images, settings: dict) -> None:
+def _run_job_thread(job_id: str, prompt: str, images, settings: dict,
+                    target: str = "headless") -> None:
     def on_status(stage: str) -> None:
         _update_job(job_id, status=stage)
 
     try:
-        result = run_pipeline(
-            prompt=prompt, images=images, settings=settings,
-            jobs_root=_jobs_root(settings), job_id=job_id,
-            on_status=on_status)
+        if target == "live":
+            result = run_live_build(
+                prompt=prompt, images=images, settings=settings,
+                job_dir=_jobs_root(settings) / job_id,
+                on_status=on_status)
+        else:
+            result = run_pipeline(
+                prompt=prompt, images=images, settings=settings,
+                jobs_root=_jobs_root(settings), job_id=job_id,
+                on_status=on_status)
     except Exception as exc:  # noqa: BLE001 - a failed thread must report
         _update_job(job_id, status="error", error=str(exc))
         return
@@ -398,11 +406,14 @@ def get_chat_file(chat_id: str, version: str, filename: str):
 @app.post("/api/jobs")
 async def create_job(
     prompt: str = Form(...),
+    target: str = Form("headless"),
     images: list[UploadFile] = File(default=[]),
 ) -> dict:
     prompt = (prompt or "").strip()
     if not prompt:
         raise HTTPException(400, "prompt must not be empty")
+    if target not in ("headless", "live"):
+        raise HTTPException(400, f"unknown target: {target!r}")
     if len(images) > MAX_IMAGES:
         raise HTTPException(400, f"at most {MAX_IMAGES} images")
     image_data = []
@@ -417,11 +428,13 @@ async def create_job(
     job_id = f"web-{int(time.time())}-{len(_jobs) + 1}"
     with _jobs_lock:
         _jobs[job_id] = {"job_id": job_id, "prompt": prompt,
+                         "target": target,
                          "status": "queued", "created": time.time(),
                          "provider": settings.get("provider"),
                          "model": settings.get("model")}
     thread = threading.Thread(
-        target=_run_job_thread, args=(job_id, prompt, image_data, settings),
+        target=_run_job_thread,
+        args=(job_id, prompt, image_data, settings, target),
         daemon=True)
     thread.start()
     return {"job_id": job_id, "status": "queued"}

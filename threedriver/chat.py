@@ -18,6 +18,9 @@ to the chosen target:
   happy. If the scene holds no matching objects, the script builds the
   part in the current scene instead.
 
+`run_live_build()` is the same live path as a one-shot job (the Buat
+model form's Live checkbox), without a chat session.
+
 Sessions live on disk under tmp/chats/<chat_id>/ (session.json plus one
 versions/v<n>/ directory per turn), so they survive a server restart.
 One turn per session at a time; a second message while a turn runs is
@@ -388,6 +391,94 @@ def _apply_live_direct(script: str, version_dir: Path, settings: dict,
     return files, note
 
 
+def _codegen_live_mod(provider, model: str, old_spec, spec: dict,
+                      inventory: dict, prompt: str, image_data) -> str:
+    """Generate a direct-modification script for the live scene: the LLM
+    sees the old spec, the new spec, and the live inventory, and writes
+    a script that edits the named objects in place. The script is
+    scanned and guarded before it is returned. Raises PipelineError on
+    refusal."""
+    mod_user = "\n".join([
+        "OLD SPEC (what the scene should currently match):",
+        json.dumps(old_spec, indent=2) if old_spec else
+        "(none — the scene may be empty or hold only default objects)",
+        "",
+        "NEW SPEC (what the scene must match after this turn):",
+        json.dumps(spec, indent=2),
+        "",
+        "SCENE INVENTORY (live objects right now):",
+        json.dumps(_inventory_summary(inventory), indent=2),
+        "",
+        "USER REQUEST:",
+        prompt,
+    ])
+    messages = [text_msg("system", LIVE_MOD_SYSTEM),
+                text_msg("user", mod_user)]
+    if image_data:
+        messages.append(image_msg(
+            "user", "Reference images for this change:", image_data))
+    code_reply = provider.complete(
+        messages, model=model, temperature=0.2,
+        max_tokens=8192, json_mode=False)
+    script = extract_code(code_reply)
+    if len(script.encode("utf-8")) > MAX_CODE_BYTES:
+        raise PipelineError("generated script larger than 100 KB")
+    findings = scan_text(script)
+    if findings:
+        detail = "; ".join(f"line {ln}: {d}" for ln, d in findings)
+        raise PipelineError(f"generated script refused: {detail}")
+    check_mod_script(script)
+    return script
+
+
+def run_live_build(*, prompt: str, images, settings: dict,
+                   job_dir: str | Path, on_status=None) -> dict:
+    """One-shot live build: spec -> inventory -> direct-mod script ->
+    execute in the open Blender -> viewport screenshot. Writes spec.json,
+    generated.py, viewport.png and report.json into job_dir and returns
+    a pipeline-style result dict. Raises PipelineError on failure."""
+    job_dir = Path(job_dir)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    provider = get_provider(settings)
+    model = settings.get("model") or "stub"
+    image_data = list(images or [])
+
+    def stage(name: str) -> None:
+        if on_status:
+            on_status(name)
+
+    stage("spec")
+    spec = _complete_json(provider, [
+        text_msg("system", SPEC_SYSTEM),
+        image_msg("user", prompt, image_data),
+    ], model)
+    (job_dir / "spec.json").write_text(
+        json.dumps(spec, indent=2), encoding="utf-8")
+
+    stage("inventory")
+    inventory = _live_inventory(settings)
+    stage("codegen")
+    script = _codegen_live_mod(provider, model, None, spec, inventory,
+                               prompt, image_data)
+    (job_dir / "generated.py").write_text(script, encoding="utf-8")
+
+    files, note = _apply_live_direct(script, job_dir, settings, stage)
+    report = {
+        "job_dir": str(job_dir),
+        "target": "live",
+        "spec": spec,
+        "files": files,
+        "verified": None,
+        "note": note,
+        "summary": _summarize(spec, "live", 1, None),
+    }
+    (job_dir / "report.json").write_text(
+        json.dumps(report, indent=2), encoding="utf-8")
+    return {"status": "done", "job_dir": str(job_dir), "target": "live",
+            "report": report, "files": files, "verified": None,
+            "note": note}
+
+
 def run_mod_turn(*, settings: dict, root: str | Path, chat_id: str,
                  prompt: str, images=None, target: str = "headless",
                  on_status=None) -> dict:
@@ -472,39 +563,9 @@ def run_mod_turn(*, settings: dict, root: str | Path, chat_id: str,
             stage("inventory")
             inventory = _live_inventory(settings)
             stage("codegen")
-            old_spec = session.get("spec")
-            mod_user = "\n".join([
-                "OLD SPEC (what the scene should currently match):",
-                json.dumps(old_spec, indent=2) if old_spec else
-                "(none — first turn; the scene may be empty or hold only "
-                "default objects)",
-                "",
-                "NEW SPEC (what the scene must match after this turn):",
-                json.dumps(spec, indent=2),
-                "",
-                "SCENE INVENTORY (live objects right now):",
-                json.dumps(_inventory_summary(inventory), indent=2),
-                "",
-                "USER REQUEST:",
-                prompt,
-            ])
-            mod_messages = [text_msg("system", LIVE_MOD_SYSTEM),
-                            text_msg("user", mod_user)]
-            if image_data:
-                mod_messages.append(image_msg(
-                    "user", "New reference images for this change:",
-                    image_data))
-            code_reply = provider.complete(
-                mod_messages, model=model, temperature=0.2,
-                max_tokens=8192, json_mode=False)
-            script = extract_code(code_reply)
-            if len(script.encode("utf-8")) > MAX_CODE_BYTES:
-                raise PipelineError("generated script larger than 100 KB")
-            findings = scan_text(script)
-            if findings:
-                detail = "; ".join(f"line {ln}: {d}" for ln, d in findings)
-                raise PipelineError(f"generated script refused: {detail}")
-            check_mod_script(script)
+            script = _codegen_live_mod(
+                provider, model, session.get("spec"), spec, inventory,
+                prompt, image_data)
             (version_dir / "generated.py").write_text(script, encoding="utf-8")
             files, note = _apply_live_direct(
                 script, version_dir, settings, stage)
@@ -572,5 +633,6 @@ __all__ = [
     "load_session",
     "save_session",
     "list_sessions",
+    "run_live_build",
     "run_mod_turn",
 ]

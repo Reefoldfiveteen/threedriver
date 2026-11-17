@@ -6,7 +6,7 @@ or live — and hands back a `.blend`, exports, a preview render, and a
 measurement report. The name means "the thing that drives Blender", not a
 hardware driver.
 
-Status: **Chat mod with live direct modification (0.7.0), plus model-list fetch in Settings.** Pick a provider on the Settings page,
+Status: **Chat mod with live direct modification + addon Live Chat (0.8.0), plus model-list fetch in Settings.** Pick a provider on the Settings page,
 type a prompt, get a verified model — or drive the Blender already open on
 your screen and watch the viewport change. The CAD bridges come next. See
 `RESEARCH-HYBRID.md` for the full design (in Indonesian).
@@ -118,11 +118,13 @@ python scripts/live_cmd.py shot C:\Users\you\view.png
 python scripts/live_cmd.py shutdown
 ```
 
-Or use the Live tab in the web UI: the Settings page holds the live
-port/token, and the Live card shows connection status, scene objects, a
-viewport screenshot button, and a code box that runs snippets in the open
-Blender. The server must still be started from Blender first (same
-N-panel button) — the web UI only talks to it, it cannot start it.
+Or use the web UI: the Settings page holds the live port/token, and
+the **Buat model** tab has a Live checkbox — tick it and the job runs
+in the open Blender instead of a fresh process, with the viewport
+panel (connection status, scene objects, screenshot button, shading
+buttons, code box) right below the form. The server must still be
+started from Blender first (same N-panel button) — the web UI only
+talks to it, it cannot start it.
 
 The Settings page also has a **Test Blender** button for headless jobs:
 it resolves the Blender executable and reports its `--version` output, so
@@ -147,7 +149,7 @@ under the real event loop, and viewport screenshots — try `live_cmd.py
 shot` once on the laptop and confirm the PNG shows the viewport.
 
 Viewport shading (addon 0.2.0+): `live_cmd.py viewport WIREFRAME` (or the
-Solid/Wireframe buttons in the Live tab) switches every 3D viewport's
+Solid/Wireframe buttons in the Buat model tab, Live checkbox on) switches every 3D viewport's
 shading without touching the scene — no save, no backup. Older addons
 answer "unknown command type": reinstall the .zip.
 
@@ -159,8 +161,8 @@ the laptop; headless, screenshots fail with the real cause attached.
 
 ## Chat mod (POC-5): revise a model across follow-up turns
 
-One-shot generation is only half the job. The **Chat mod** tab (third tab
-in the web UI) holds conversations anchored to one model each:
+One-shot generation is only half the job. The **Chat mod** tab (second
+tab in the web UI) holds conversations anchored to one model each:
 
 * The first message builds the model (full pipeline).
 * Every later message revises it: the LLM revises the stored spec JSON,
@@ -182,6 +184,14 @@ then edits the in-memory scene, and the user saves with Ctrl+S when
 happy. Mod scripts are refused if they try to save or open files. If
 the scene holds no matching objects, the script builds the part in the
 current scene. Headless turns never touch the open Blender.
+
+The same live chat also lives INSIDE Blender (addon 0.4.0+): the
+N-panel > 3Driver tab has a **Live Chat** panel — type a message, press
+Kirim, and the turn runs with the live target, no browser needed. It is
+a thin client for the web UI's chat API (same sessions the browser
+shows; paste a chat ID to resume one), so the web server
+(`start-windows.bat`) must be running. Text only for now — reference
+image uploads stay in the browser.
 
 ## Job contract
 
@@ -239,7 +249,7 @@ threedriver/
   scan.py             pre-execution text scan
   config.py           settings file + provider registry (keys masked)
   pipeline.py         prompt -> spec -> script -> build -> verify
-  webapp.py           FastAPI app: settings, jobs, live tab, chat-mod
+  webapp.py           FastAPI app: settings, jobs, live panel, chat-mod
   web/index.html      the UI (single page, no build step)
   providers/          stub, OpenAI-compatible, Gemini clients
   live_client.py      client for the live addon socket (localhost + token)
@@ -252,7 +262,8 @@ scripts/
   run_prompt.py       CLI: run the full prompt pipeline
   serve.py            CLI: start the web UI
   smoke_web.py        end-to-end web UI smoke test (stub provider)
-  smoke_live_ui.py    end-to-end live-tab smoke test (headless live server)
+  smoke_live_ui.py    end-to-end live-panel smoke test (headless live server)
+  test_addon_chat.py  headless test: addon Live Chat client vs a mock web UI
   smoke_chat.py       end-to-end chat-mod smoke test (stub + live server)
   smoke_models.py     model-list fetch smoke test (mock provider servers)
   live_cmd.py         CLI: talk to a running live Blender
@@ -273,8 +284,10 @@ RESEARCH-HYBRID.md    architecture, contracts, POC plan (Indonesian)
    switcher, viewport wireframe toggle) — done.
 6. Live direct modification (inventory + in-place edits, no rebuild)
    + viewport screenshot context-override fix (addon 0.3.0) — done
-   (0.7.0, this release).
-7. Next: vision check of renders vs reference (six-side ortho renders
+   (0.7.0).
+7. Merged Buat model tab (Live checkbox instead of a separate tab) +
+   addon Live Chat panel (addon 0.4.0) — done (0.8.0, this release).
+8. Next: vision check of renders vs reference (six-side ortho renders
    compared by a vision model, revising only what missed).
-8. Optional: CadQuery executor for prismatic parts, local instant-mesh
+9. Optional: CadQuery executor for prismatic parts, local instant-mesh
    models (TripoSR), 3ds Max / Inventor bridges.

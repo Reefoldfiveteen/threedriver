@@ -26,12 +26,18 @@ Protocol (one JSON object per line, "\\n" terminated):
   {"id": "...", "token": "...", "type": "execute_code", "code": "..."}
   -> {"id": "...", "ok": true, "stdout": "...", "result": "...",
       "notes": [...], "warnings": [...]}
+
+The N-panel also has a Live Chat panel: a thin client for the local web
+UI's chat API (same endpoints the browser uses), so live modification
+works without opening a browser. The brain stays in the web app — it runs
+the LLM calls and drives this Blender back through the socket above.
+Blender's Python has no httpx, so the chat client uses urllib (stdlib).
 """
 
 bl_info = {
     "name": "3Driver Live",
     "author": "Reefoldfiveteen",
-    "version": (0, 3, 0),
+    "version": (0, 4, 0),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > 3Driver",
     "description": "Local socket server so 3Driver can drive this Blender "
@@ -46,9 +52,13 @@ import os
 import queue
 import secrets
 import socket
+import textwrap
 import threading
 import time
 import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import bpy
@@ -463,6 +473,136 @@ def is_running() -> bool:
     return _state.get("server") is not None
 
 
+# ------------------------------------------------- web UI chat client
+# Thin client for the local web UI's chat API. The web app runs the LLM
+# calls and drives this Blender back through the socket; this side only
+# sends text and polls for the turn result. No auth: the web UI binds
+# 127.0.0.1 only, same as the live socket.
+
+DEFAULT_WEB_URL = "http://127.0.0.1:8765"
+
+_chat_state = {
+    "chat_id": None,
+    "messages": [],   # [{role, text}] — last few, for the panel log
+    "status": "",
+    "polling": False,
+    "web_base": None,
+}
+
+
+class ChatWebError(Exception):
+    """The web UI could not be reached or answered badly."""
+
+
+def _web_base() -> str:
+    try:
+        prefs = bpy.context.preferences.addons["threedriver_live"].preferences
+        url = (getattr(prefs, "web_url", "") or "").strip()
+        if url:
+            return url.rstrip("/")
+    except Exception:  # noqa: BLE001 - prefs missing (headless test): default
+        pass
+    return DEFAULT_WEB_URL
+
+
+def _chat_http(base: str, method: str, path: str, data=None,
+               json_data=None, timeout: float = 15.0) -> dict:
+    """One JSON request to the web UI. `data` is urlencoded form fields,
+    `json_data` is a JSON body. Raises ChatWebError, plainly worded."""
+    url = base.rstrip("/") + path
+    body = None
+    headers = {"Accept": "application/json"}
+    if json_data is not None:
+        body = json.dumps(json_data).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    elif data is not None:
+        body = urllib.parse.urlencode(data).encode("utf-8")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    req = urllib.request.Request(url, data=body, headers=headers,
+                                 method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        raise ChatWebError(
+            f"web UI menjawab HTTP {exc.code}: "
+            f"{exc.read().decode('utf-8', 'replace')[:200]}")
+    except urllib.error.URLError as exc:
+        raise ChatWebError(
+            "web UI tidak terjangkau di " + base +
+            " — nyalakan start-windows.bat dulu "
+            f"({exc.reason})")
+    except (OSError, ValueError) as exc:
+        raise ChatWebError(f"web UI tidak terjangkau: {exc}")
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError:
+        raise ChatWebError("web UI menjawab bukan JSON")
+    if not isinstance(parsed, dict):
+        raise ChatWebError("web UI menjawab bentuk yang tidak dikenal")
+    return parsed
+
+
+def _chat_fetch(base: str, chat_id: str) -> dict:
+    return _chat_http(base, "GET", f"/api/chats/{chat_id}")
+
+
+def _chat_apply_session(session: dict) -> None:
+    msgs = []
+    for m in session.get("messages", [])[-8:]:
+        text = (m.get("text") or "").strip()
+        if m.get("status") == "error":
+            text = f"ERROR: {m.get('error', 'unknown')}"
+        elif not text and m.get("status"):
+            text = f"({m['status']})"
+        msgs.append({"role": m.get("role", "?"), "text": text})
+    _chat_state["messages"] = msgs
+    _chat_state["chat_id"] = session.get("id")
+
+
+def _chat_redraw() -> None:
+    try:
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                area.tag_redraw()
+    except Exception:  # noqa: BLE001 - headless has no windows
+        pass
+
+
+def _chat_poll() -> float | None:
+    """Timer: wait for the pending turn, then show the result. Returns
+    the next interval, or None to stop."""
+    base = _chat_state.get("web_base") or _web_base()
+    chat_id = _chat_state.get("chat_id")
+    if not chat_id:
+        _chat_state["polling"] = False
+        return None
+    try:
+        session = _chat_fetch(base, chat_id)
+    except ChatWebError as exc:
+        _chat_state["status"] = str(exc)
+        _chat_state["polling"] = False
+        _chat_redraw()
+        return None
+    _chat_apply_session(session)
+    if session.get("pending"):
+        _chat_state["status"] = (
+            "giliran jalan… (" + str(session["pending"].get("stage", "")) + ")")
+        _chat_redraw()
+        return 1.0
+    _chat_state["status"] = "selesai"
+    _chat_state["polling"] = False
+    _chat_redraw()
+    return None
+
+
+def _wrap_lines(text: str, width: int = 52) -> list[str]:
+    lines = []
+    for para in text.splitlines() or [""]:
+        lines.extend(textwrap.wrap(para, width=width) or [""])
+    return lines
+
+
 # ----------------------------------------------------------------- UI
 
 class ThreedriverLivePreferences(bpy.types.AddonPreferences):
@@ -474,11 +614,15 @@ class ThreedriverLivePreferences(bpy.types.AddonPreferences):
         name="Token file", default="",
         description="Secret token file (empty = ~/.threedriver/live_token)",
         subtype="FILE_PATH")
+    web_url: bpy.props.StringProperty(
+        name="Web UI URL", default=DEFAULT_WEB_URL,
+        description="Alamat web UI lokal untuk Live Chat")
 
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "port")
         layout.prop(self, "token_file")
+        layout.prop(self, "web_url")
         layout.label(text="Server binds 127.0.0.1 only. Stop it when done.")
 
 
@@ -517,6 +661,7 @@ class THREEDRIVER_PT_panel(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "3Driver"
+    bl_order = 0
 
     def draw(self, context):
         layout = self.layout
@@ -531,19 +676,172 @@ class THREEDRIVER_PT_panel(bpy.types.Panel):
         layout.label(text="runs before every execute_code.")
 
 
+class THREEDRIVER_OT_chat_new(bpy.types.Operator):
+    bl_idname = "threedriver.chat_new"
+    bl_label = "Chat Live Baru"
+    bl_description = "Buat chat live baru di web UI"
+
+    def execute(self, context):
+        base = _web_base()
+        try:
+            created = _chat_http(base, "POST", "/api/chats", json_data={})
+            session = _chat_fetch(base, created["id"])
+        except (ChatWebError, KeyError) as exc:
+            self.report({"ERROR"}, str(exc))
+            _chat_state["status"] = str(exc)
+            return {"CANCELLED"}
+        _chat_state["web_base"] = base
+        _chat_apply_session(session)
+        context.scene.td_chat_id = session["id"]
+        _chat_state["status"] = f"chat baru: {session['id']}"
+        return {"FINISHED"}
+
+
+class THREEDRIVER_OT_chat_load(bpy.types.Operator):
+    bl_idname = "threedriver.chat_load"
+    bl_label = "Muat Chat Live"
+    bl_description = "Muat chat live dari web UI berdasarkan ID"
+
+    def execute(self, context):
+        chat_id = (context.scene.td_chat_id or "").strip()
+        if not chat_id:
+            self.report({"ERROR"}, "ID chat masih kosong")
+            return {"CANCELLED"}
+        base = _web_base()
+        try:
+            session = _chat_fetch(base, chat_id)
+        except ChatWebError as exc:
+            self.report({"ERROR"}, str(exc))
+            _chat_state["status"] = str(exc)
+            return {"CANCELLED"}
+        _chat_state["web_base"] = base
+        _chat_apply_session(session)
+        _chat_state["status"] = f"chat dimuat: {chat_id}"
+        return {"FINISHED"}
+
+
+class THREEDRIVER_OT_chat_send(bpy.types.Operator):
+    bl_idname = "threedriver.chat_send"
+    bl_label = "Kirim ke Chat Live"
+    bl_description = "Kirim pesan ke chat live (target: file yang terbuka)"
+
+    def execute(self, context):
+        scene = context.scene
+        text = (scene.td_chat_input or "").strip()
+        if not text:
+            self.report({"ERROR"}, "Pesan masih kosong")
+            return {"CANCELLED"}
+        if _chat_state.get("polling"):
+            self.report({"WARNING"}, "Masih menunggu giliran sebelumnya")
+            return {"CANCELLED"}
+        base = _web_base()
+        chat_id = (scene.td_chat_id or "").strip()
+        try:
+            if not chat_id:
+                created = _chat_http(base, "POST", "/api/chats", json_data={})
+                chat_id = created["id"]
+                scene.td_chat_id = chat_id
+            _chat_http(base, "POST", f"/api/chats/{chat_id}/messages",
+                       data={"text": text, "target": "live"})
+            session = _chat_fetch(base, chat_id)
+        except (ChatWebError, KeyError) as exc:
+            self.report({"ERROR"}, str(exc))
+            _chat_state["status"] = str(exc)
+            return {"CANCELLED"}
+        _chat_state["web_base"] = base
+        _chat_apply_session(session)
+        scene.td_chat_input = ""
+        _chat_state["status"] = "giliran jalan…"
+        _chat_state["polling"] = True
+        if not bpy.app.timers.is_registered(_chat_poll):
+            bpy.app.timers.register(_chat_poll, first_interval=1.0)
+        return {"FINISHED"}
+
+
+class THREEDRIVER_OT_chat_refresh(bpy.types.Operator):
+    bl_idname = "threedriver.chat_refresh"
+    bl_label = "Refresh Chat Live"
+    bl_description = "Muat ulang pesan chat live dari web UI"
+
+    def execute(self, context):
+        chat_id = (context.scene.td_chat_id or "").strip()
+        if not chat_id:
+            self.report({"ERROR"}, "Belum ada chat — pencet Chat baru dulu")
+            return {"CANCELLED"}
+        try:
+            session = _chat_fetch(_web_base(), chat_id)
+        except ChatWebError as exc:
+            self.report({"ERROR"}, str(exc))
+            _chat_state["status"] = str(exc)
+            return {"CANCELLED"}
+        _chat_apply_session(session)
+        _chat_state["status"] = "diperbarui"
+        return {"FINISHED"}
+
+
+class THREEDRIVER_PT_chat(bpy.types.Panel):
+    bl_label = "Live Chat"
+    bl_idname = "THREEDRIVER_PT_chat"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "3Driver"
+    bl_order = 1
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        row = layout.row()
+        row.prop(scene, "td_chat_id", text="ID chat")
+        row.operator("threedriver.chat_load", text="Muat")
+        layout.operator("threedriver.chat_new", text="Chat baru")
+        for msg in _chat_state.get("messages", []):
+            who = "Anda" if msg["role"] == "user" else "3Driver"
+            for line in _wrap_lines(f"{who}: {msg['text']}")[:6]:
+                layout.label(text=line)
+        layout.separator()
+        layout.prop(scene, "td_chat_input", text="Pesan")
+        row = layout.row()
+        row.enabled = not _chat_state.get("polling")
+        row.operator("threedriver.chat_send", text="Kirim (Live)")
+        layout.operator("threedriver.chat_refresh", text="Refresh")
+        status = _chat_state.get("status") or ""
+        if status:
+            layout.label(text=status)
+        layout.label(text="Mengubah file yang terbuka, langsung.")
+        layout.label(text="Butuh server web (start-windows.bat).")
+        layout.label(text="Upload gambar tetap lewat browser.")
+
+
 _CLASSES = (ThreedriverLivePreferences, THREEDRIVER_OT_start_server,
-            THREEDRIVER_OT_stop_server, THREEDRIVER_PT_panel)
+            THREEDRIVER_OT_stop_server, THREEDRIVER_PT_panel,
+            THREEDRIVER_OT_chat_new, THREEDRIVER_OT_chat_load,
+            THREEDRIVER_OT_chat_send, THREEDRIVER_OT_chat_refresh,
+            THREEDRIVER_PT_chat)
 
 
 def register():
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
+    bpy.types.Scene.td_chat_id = bpy.props.StringProperty(
+        name="ID chat", default="",
+        description="ID chat live di web UI (kosong = buat baru saat kirim)")
+    bpy.types.Scene.td_chat_input = bpy.props.StringProperty(
+        name="Pesan", default="",
+        description="Pesan untuk chat live")
 
 
 def unregister():
     stop_server()
+    try:
+        if bpy.app.timers.is_registered(_chat_poll):
+            bpy.app.timers.unregister(_chat_poll)
+    except Exception:  # noqa: BLE001 - stopping must never raise
+        pass
     for cls in reversed(_CLASSES):
         bpy.utils.unregister_class(cls)
+    for prop in ("td_chat_id", "td_chat_input"):
+        if hasattr(bpy.types.Scene, prop):
+            delattr(bpy.types.Scene, prop)
 
 
 if __name__ == "__main__":
