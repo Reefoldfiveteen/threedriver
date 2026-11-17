@@ -6,7 +6,7 @@ or live — and hands back a `.blend`, exports, a preview render, and a
 measurement report. The name means "the thing that drives Blender", not a
 hardware driver.
 
-Status: **POC-5 — chat mod.** Pick a provider on the Settings page,
+Status: **POC-5 — chat mod, plus model-list fetch in Settings.** Pick a provider on the Settings page,
 type a prompt, get a verified model — or drive the Blender already open on
 your screen and watch the viewport change. The CAD bridges come next. See
 `RESEARCH-HYBRID.md` for the full design (in Indonesian).
@@ -66,7 +66,13 @@ Everything is configured on the Settings page — no code or file editing:
   OpenAI-compatible endpoint. Switching provider is a dropdown + save.
 * **Model / base URL**: prefilled with sane defaults where known; 9router
   needs its base URL (local `http://127.0.0.1:20128` or your tunnel URL)
-  and defaults to the `HERMES2` combo model.
+  and defaults to the `HERMES2` combo model. The **Ambil daftar model
+  dari API** button asks the configured provider what models it actually
+  offers (OpenAI-compatible `GET /v1/models`, Gemini `GET /v1beta/models`)
+  and fills a dropdown, so a model is picked from what is available
+  instead of typed from memory; manual typing still works for names the
+  list does not show. The fetch uses the form's current values, so
+  unsaved edits can be tried before saving.
 * **API key**: stored in local `settings.json` (gitignored, mode 0600 on
   POSIX), never committed, never logged, never shown in full. Leaving the
   key field blank keeps the stored key. Environment variables
@@ -238,6 +244,7 @@ scripts/
   smoke_web.py        end-to-end web UI smoke test (stub provider)
   smoke_live_ui.py    end-to-end live-tab smoke test (headless live server)
   smoke_chat.py       end-to-end chat-mod smoke test (stub + live server)
+  smoke_models.py     model-list fetch smoke test (mock provider servers)
   live_cmd.py         CLI: talk to a running live Blender
   test_live_headless.py  end-to-end live addon test (headless Blender)
   package_addon.py    zip the live addon for Blender Install from Disk

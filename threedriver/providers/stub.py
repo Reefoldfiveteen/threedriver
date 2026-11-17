@@ -119,3 +119,6 @@ class StubProvider:
         if script is None:
             return _FALLBACK_CUBE
         return "```python\n" + script + "\n```"
+
+    def list_models(self) -> list[str]:
+        return ["stub"]

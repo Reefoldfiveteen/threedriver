@@ -175,3 +175,54 @@ class OpenAICompatProvider:
                 f"provider HTTP {resp.status_code}: {resp.text[:300]}"
             )
         return _parse_body(resp.text)
+
+    def list_models(self) -> list[str]:
+        """GET {base_url}/models -> sorted unique model ids.
+
+        Tolerant of the shapes routers return: {"data": [{"id": ...}]},
+        {"models": [...]}, or a bare list. An empty 200 body is an error
+        (see the module docstring: routers return it when a combo fails
+        without falling back), never an empty list.
+        """
+        try:
+            with httpx.Client(timeout=20.0, trust_env=False) as client:
+                resp = client.get(
+                    f"{self._base_url}/models",
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                )
+        except httpx.RequestError as exc:
+            raise ProviderError(f"could not reach provider: {exc}") from exc
+        if resp.status_code >= 400:
+            raise ProviderError(
+                f"provider HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+        text = resp.text.strip()
+        if not text:
+            raise ProviderError(
+                "provider returned an empty body for the model list "
+                "(HTTP 200, no content) — try again, or another base URL."
+            )
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            start, end = text.find("{"), text.rfind("}")
+            if start < 0 or end <= start:
+                raise ProviderError(
+                    "model list was not JSON "
+                    f"(first 200 chars: {text[:200]!r})."
+                )
+            data = json.loads(text[start:end + 1])
+        entries = []
+        if isinstance(data, dict):
+            entries = data.get("data") or data.get("models") or []
+        elif isinstance(data, list):
+            entries = data
+        ids: set[str] = set()
+        for entry in entries:
+            if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+                ids.add(entry["id"])
+            elif isinstance(entry, str):
+                ids.add(entry)
+            elif isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                ids.add(entry["name"])
+        return sorted(ids)

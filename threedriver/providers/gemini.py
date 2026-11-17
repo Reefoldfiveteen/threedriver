@@ -107,3 +107,51 @@ class GeminiProvider:
                 "by a safety filter or the model name may be wrong)."
             )
         return joined
+
+    def list_models(self) -> list[str]:
+        """GET {base_url}/models (paged) -> sorted unique model ids.
+
+        Only models that support generateContent are kept (embedding and
+        other special-purpose models are dropped). The "models/" prefix
+        in names is stripped: generateContent takes the bare id.
+        """
+        ids: set[str] = set()
+        page_token = None
+        try:
+            with httpx.Client(timeout=20.0, trust_env=False) as client:
+                for _ in range(5):  # at most 5 pages (500 models)
+                    params = {"key": self._api_key, "pageSize": 100}
+                    if page_token:
+                        params["pageToken"] = page_token
+                    resp = client.get(f"{self._base_url}/models",
+                                      params=params)
+                    if resp.status_code >= 400:
+                        raise ProviderError(
+                            f"Gemini HTTP {resp.status_code}: {resp.text[:300]}"
+                        )
+                    try:
+                        data = resp.json()
+                    except ValueError as exc:
+                        raise ProviderError(
+                            f"Gemini returned non-JSON: {resp.text[:200]!r}"
+                        ) from exc
+                    if isinstance(data.get("error"), dict):
+                        raise ProviderError(
+                            "Gemini error: "
+                            f"{data['error'].get('message', data['error'])}"
+                        )
+                    for entry in data.get("models", []) or []:
+                        name = entry.get("name", "")
+                        if not isinstance(name, str) or not name:
+                            continue
+                        methods = entry.get("supportedGenerationMethods")
+                        if (isinstance(methods, list)
+                                and "generateContent" not in methods):
+                            continue
+                        ids.add(name.removeprefix("models/"))
+                    page_token = data.get("nextPageToken")
+                    if not page_token:
+                        break
+        except httpx.RequestError as exc:
+            raise ProviderError(f"could not reach Gemini: {exc}") from exc
+        return sorted(ids)

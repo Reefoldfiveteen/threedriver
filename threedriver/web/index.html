@@ -57,6 +57,12 @@
     <div><label for="model">Model</label><input type="text" id="model"></div>
     <div><label for="base_url">Base URL</label><input type="text" id="base_url"></div>
   </div>
+  <button id="fetchModelsBtn" class="secondary">Ambil daftar model dari API</button>
+  <div id="modelListWrap" style="display:none">
+    <label for="modelList">Model yang tersedia — pilih untuk mengisi kolom Model</label>
+    <select id="modelList"></select>
+  </div>
+  <div id="modelListMsg" class="hint"></div>
   <label for="api_key">API key</label>
   <input type="password" id="api_key" placeholder="Kosongkan untuk memakai key yang sudah tersimpan">
   <div class="hint">Key tersimpan lokal di settings.json (tidak ikut ke GitHub) dan tidak pernah ditampilkan utuh.</div>
@@ -198,7 +204,11 @@ function applyProviderDefaults(fillEmpty) {
     if (!$('base_url').value) $('base_url').value = p.default_base_url || '';
   }
 }
-$('provider').addEventListener('change', () => applyProviderDefaults(true));
+$('provider').addEventListener('change', () => {
+  applyProviderDefaults(true);
+  $('modelListWrap').style.display = 'none';
+  $('modelListMsg').textContent = '';
+});
 
 function applyBlenderMode() {
   const custom = $('blender_mode').value === 'custom';
@@ -234,6 +244,40 @@ $('testBtn').addEventListener('click', async () => {
   const res = await fetch('/api/test-provider', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
   const data = await res.json();
   showMsg($('settingsMsg'), data.ok ? ('Provider OK, balasan: ' + data.reply) : ('Provider gagal: ' + (data.error || 'unknown')), data.ok);
+});
+
+$('fetchModelsBtn').addEventListener('click', async () => {
+  $('modelListMsg').textContent = 'Mengambil daftar model dari API…';
+  $('fetchModelsBtn').disabled = true;
+  try {
+    const res = await fetch('/api/models', { method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider: $('provider').value, base_url: $('base_url').value.trim(), api_key: $('api_key').value}) });
+    const data = await res.json();
+    if (!data.ok) {
+      $('modelListWrap').style.display = 'none';
+      $('modelListMsg').textContent = 'Gagal mengambil daftar model: ' + (data.error || 'unknown');
+      return;
+    }
+    if (!data.models.length) {
+      $('modelListWrap').style.display = 'none';
+      $('modelListMsg').textContent = 'API tidak melaporkan model apa pun. Ketik nama model manual di kolom Model.';
+      return;
+    }
+    const sel = $('modelList');
+    const current = $('model').value.trim();
+    sel.innerHTML = '<option value="">— pilih model —</option>' + data.models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+    if (current && data.models.includes(current)) sel.value = current;
+    $('modelListWrap').style.display = 'block';
+    $('modelListMsg').textContent = data.models.length + ' model tersedia dari ' + (data.provider || 'provider') + '. Pilih satu, lalu Simpan pengaturan.';
+  } catch (e) {
+    $('modelListWrap').style.display = 'none';
+    $('modelListMsg').textContent = 'Gagal menghubungi server web UI.';
+  } finally {
+    $('fetchModelsBtn').disabled = false;
+  }
+});
+$('modelList').addEventListener('change', () => {
+  if ($('modelList').value) $('model').value = $('modelList').value;
 });
 
 $('testBlenderBtn').addEventListener('click', async () => {

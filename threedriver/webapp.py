@@ -48,7 +48,7 @@ from .headless import (
 )
 from .live_client import LiveClient, LiveError
 from .pipeline import run_pipeline
-from .providers import ProviderError, get_provider, text_msg
+from .providers import ProviderError, get_provider, list_models, text_msg
 
 MAX_IMAGES = 5
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -156,6 +156,27 @@ def test_provider(payload: dict | None = None) -> dict:
     except ProviderError as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True, "reply": reply.strip()[:200]}
+
+
+@app.post("/api/models")
+def list_models_endpoint(payload: dict | None = None) -> dict:
+    """Fetch the model list from the configured provider's API.
+
+    Payload overrides (provider, base_url, api_key) win over saved
+    settings when non-empty, so unsaved form values can be tried first.
+    An empty api_key means "use the saved key", as everywhere else.
+    """
+    settings = load_settings()
+    for key in ("provider", "base_url", "api_key"):
+        value = (payload or {}).get(key)
+        if value:
+            settings[key] = value
+    try:
+        models = list_models(settings)
+    except ProviderError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "provider": settings.get("provider"),
+            "models": models, "count": len(models)}
 
 
 @app.post("/api/test-blender")

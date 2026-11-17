@@ -48,10 +48,16 @@ def get_provider(settings: dict):
     raise ProviderError(f"unsupported client type: {client}")
 
 
+def list_models(settings: dict) -> list[str]:
+    """List the models the configured provider reports as available."""
+    return get_provider(settings).list_models()
+
+
 __all__ = [
     "ProviderError",
     "text_msg",
     "get_provider",
+    "list_models",
     "OpenAICompatProvider",
     "GeminiProvider",
     "StubProvider",
