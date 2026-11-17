@@ -3,8 +3,10 @@
 The spec step always returns the plate specification; the codegen step
 returns the proven plate example script (``examples/plate_with_holes.py``
 from the repo checkout, or a small built-in cube script if the file cannot
-be found). Use it to try the whole loop — prompt, job, build, verify —
-before any API key exists, and in automated smoke tests.
+be found); a direct-modification step returns a small script that scales
+the scene's Cube x2 in place (or builds a small cube when there is no
+Cube). Use it to try the whole loop — prompt, job, build, verify — before
+any API key exists, and in automated smoke tests.
 """
 
 from __future__ import annotations
@@ -98,6 +100,27 @@ def _find_example_script() -> str | None:
     return None
 
 
+_MOD_SCRIPT = '''"""Stub live-mod script: scale the scene's Cube x2, in place."""
+import bpy
+
+obj = bpy.data.objects.get("Cube")
+if obj is not None:
+    obj.scale = (2.0, 2.0, 2.0)
+    __result__ = "scaled Cube x2 in place"
+else:
+    mesh = bpy.data.meshes.new("StubCube")
+    vs = [(-10, -10, 0), (10, -10, 0), (10, 10, 0), (-10, 10, 0),
+          (-10, -10, 20), (10, -10, 20), (10, 10, 20), (-10, 10, 20)]
+    fs = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4),
+          (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
+    mesh.from_pydata(vs, [], fs)
+    mesh.update()
+    obj = bpy.data.objects.new("StubCube", mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    __result__ = "created StubCube (no Cube in scene)"
+'''
+
+
 class StubProvider:
     def complete(
         self,
@@ -113,6 +136,8 @@ class StubProvider:
             for msg in messages if msg["role"] == "system"
             for part in msg["parts"] if part["type"] == "text"
         ).lower()
+        if "direct modification" in system_text:
+            return "```python\n" + _MOD_SCRIPT + "\n```"
         if "specification" in system_text or json_mode:
             return json.dumps(PLATE_SPEC, indent=2)
         script = _find_example_script()

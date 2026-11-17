@@ -7,12 +7,16 @@ user asked), writes a fresh script from the revised spec, and applies it
 to the chosen target:
 
 * headless — a fresh `blender -b` process per version, probe-verified,
-  exactly like a one-shot job. Safe default.
-* live — the full script runs in the open Blender via the live addon
-  (which saves + writes a timestamped backup first), then a viewport
-  screenshot is captured. The scene is rebuilt, not patched: the script
-  clears the scene first, so the pre-mod file lives on only as the
-  addon's backup copy.
+  exactly like a one-shot job. Safe default. Builds a NEW file per
+  version.
+* live — DIRECT MODIFICATION of the open Blender file: the turn first
+  reads the live scene inventory (object names, types, dimensions),
+  then the LLM writes a script that edits those objects in place — no
+  scene clear, no new file, no save. The addon still saves + writes a
+  timestamped backup BEFORE executing, and a viewport screenshot is
+  captured after. The user saves the modified file with Ctrl+S when
+  happy. If the scene holds no matching objects, the script builds the
+  part in the current scene instead.
 
 Sessions live on disk under tmp/chats/<chat_id>/ (session.json plus one
 versions/v<n>/ directory per turn), so they survive a server restart.
@@ -58,6 +62,44 @@ features the user did not ask for, and never drop a feature silently.
 
 Reply with ONLY the full revised JSON object, no prose, no markdown \
 fences, using the same schema as the current spec."""
+
+LIVE_MOD_SYSTEM = """You write a Blender Python (bpy) script for direct modification \
+of the objects already in the open Blender scene, implementing the change \
+from the OLD spec to the NEW spec. The script runs inside a GUI Blender \
+via a socket addon, on the main thread, with `bpy`, `bmesh`, `mathutils`, \
+and `Vector` already available. It takes NO arguments and runs with NO \
+headless context.
+
+Rules:
+1. DO NOT clear the scene. DO NOT delete all objects. Edit the existing \
+objects listed in the SCENE INVENTORY, found by exact name via \
+bpy.data.objects.get("name"). If a named object is missing, build that \
+part of the NEW spec fresh in the current scene instead of failing, and \
+say so in __result__.
+2. UNITS: millimetres. Coordinates are plain millimetre numbers.
+3. STYLE: bpy.data / bmesh only. Do NOT use bpy.ops for modelling \
+(UI-context dependent). No render calls, no file writes.
+4. FORBIDDEN: saving or opening files (no save_mainfile, \
+save_as_mainfile, open_mainfile, read_factory_settings), no network, \
+subprocess, shell commands, eval/exec. The addon already saved + backed \
+up the open file before running this script; the user saves afterwards \
+with Ctrl+S.
+5. IMPLEMENT THE DELTA: change only what differs between OLD and NEW \
+spec (or what the user asked). Keep every other object, dimension, and \
+position untouched. Prefer editing the existing mesh (move vertices, \
+rebuild one object's mesh in place with bmesh) over deleting and \
+recreating objects; keep object names stable so later turns can find \
+them again.
+6. NO BOOLEANS: never use boolean modifiers or operations — they have \
+silently failed to cut holes on some builds. Rebuild meshes with holes \
+directly (tessellate_polygon + stitched walls, or vertex by vertex).
+7. Set __result__ to a one-line summary of what changed (object names + \
+what was done). Do not print long output.
+8. If the scene inventory is empty or holds only default objects \
+(Cube/Camera/Light), build the NEW spec's part in the current scene \
+from scratch, using the object name from the spec.
+
+Reply with ONLY the Python code in one ```python fenced block, no prose."""
 
 MAX_IMAGES = 5
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -211,7 +253,8 @@ def _summarize(spec: dict, target: str, n: int, verified) -> str:
         ver = " · verifikasi GAGAL, cek laporannya"
     name = (spec or {}).get("name") or "model"
     desc = (spec or {}).get("description") or ""
-    return f"v{n} ({target}): {name}{dim_txt}{ver}" + (f"\n{desc}" if desc else "")
+    label = "live, langsung" if target == "live" else target
+    return f"v{n} ({label}): {name}{dim_txt}{ver}" + (f"\n{desc}" if desc else "")
 
 
 def _apply_headless(script: str, version_dir: Path, job_id: str,
@@ -253,47 +296,94 @@ def _apply_headless(script: str, version_dir: Path, job_id: str,
     return report, verified, files
 
 
-def _apply_live(script: str, version_dir: Path, settings: dict,
-                on_status) -> tuple[list[str], str]:
-    """Run the script in the open Blender, then screenshot the viewport.
-
-    The pipeline script expects --job-dir on argv, which live execution
-    does not provide, so a preamble sets sys.argv first. The addon saves
-    + backs up the open file before running (its own safety contract).
-    Returns (files, screenshot_note): the note is "" when the viewport
-    PNG was captured, else the reason it could not be.
-    """
+def _live_port(settings: dict) -> int:
     try:
-        port = int(settings.get("live_port") or 9877)
+        return int(settings.get("live_port") or 9877)
     except (TypeError, ValueError):
-        port = 9877
-    preamble = (
-        "import sys as _td_sys, json as _td_json\n"
-        f"_td_sys.argv = ['blender', '--', '--job-dir', "
-        f"{json.dumps(str(version_dir))}]\n"
-    )
+        return 9877
+
+
+def _live_inventory(settings: dict) -> dict:
+    """Read the open Blender's scene via get_scene (a read-only command:
+    no save, no backup — unlike execute_code)."""
+    with LiveClient(port=_live_port(settings),
+                    token=settings.get("live_token") or None,
+                    timeout=30.0) as client:
+        resp = client.get_scene()
+    if not resp.get("ok"):
+        raise PipelineError(
+            f"could not read live scene: {resp.get('error', 'unknown')}")
+    scene = resp.get("result")
+    if not isinstance(scene, dict):
+        raise PipelineError("live scene reply was not an object")
+    return scene
+
+
+def _inventory_summary(inventory: dict) -> dict:
+    """Trim the inventory for the prompt: at most 50 objects."""
+    objects = inventory.get("objects") or []
+    return {
+        "filepath": inventory.get("filepath") or "(unsaved file)",
+        "object_count": inventory.get("object_count", len(objects)),
+        "active_object": inventory.get("active_object"),
+        "objects": objects[:50],
+        "truncated": len(objects) > 50,
+    }
+
+
+_FORBIDDEN_IN_MOD = ("save_as_mainfile", "save_mainfile", "open_mainfile",
+                     "read_factory_settings", "read_homefile")
+
+
+def check_mod_script(script: str) -> None:
+    """Refuse live-mod scripts that save or open files. The addon saves +
+    backs up before executing; the user saves afterwards. A mod script
+    must only touch the in-memory scene."""
+    for token in _FORBIDDEN_IN_MOD:
+        if token in script:
+            raise PipelineError(
+                f"live-mod script refused: it must not call {token} "
+                "(the addon saves + backs up before executing; "
+                "the user saves afterwards with Ctrl+S)")
+
+
+def _capture_viewport(version_dir: Path, settings: dict) -> str:
+    """Screenshot the live viewport into the version dir. Returns "" on
+    success, else a user-facing note (the mod already applied; a failed
+    screenshot must not fail the turn)."""
+    shot = version_dir / "viewport.png"
+    try:
+        with LiveClient(port=_live_port(settings),
+                        token=settings.get("live_token") or None,
+                        timeout=30.0) as client:
+            shot_resp = client.screenshot(str(shot))
+        if not shot_resp.get("ok") or not shot.is_file():
+            return ("Model sudah diubah di live Blender, tapi screenshot "
+                    f"viewport gagal: {shot_resp.get('error', 'unknown')}")
+    except LiveError as exc:
+        return ("Model sudah diubah di live Blender, tapi screenshot "
+                f"gagal: {exc}")
+    return ""
+
+
+def _apply_live_direct(script: str, version_dir: Path, settings: dict,
+                       on_status) -> tuple[list[str], str]:
+    """Execute a direct-modification script in the open Blender, then
+    screenshot the viewport. The script takes no arguments and writes
+    no files — it edits the in-memory scene only."""
     if on_status:
         on_status("live")
-    with LiveClient(port=port, token=settings.get("live_token") or None,
+    with LiveClient(port=_live_port(settings),
+                    token=settings.get("live_token") or None,
                     timeout=120.0) as client:
-        resp = client.execute(preamble + script, timeout=120.0)
+        resp = client.execute(script, timeout=120.0)
     if not resp.get("ok"):
         detail = resp.get("error") or "live execution failed"
         tail = (resp.get("stderr") or resp.get("stdout") or "").strip()
         if tail:
             detail += "\n" + "\n".join(tail.splitlines()[-10:])
         raise PipelineError(detail)
-    note = ""
-    shot = version_dir / "viewport.png"
-    try:
-        with LiveClient(port=port, token=settings.get("live_token") or None,
-                        timeout=30.0) as client:
-            shot_resp = client.screenshot(str(shot))
-        if not shot_resp.get("ok") or not shot.is_file():
-            note = ("Model sudah diubah di live Blender, tapi screenshot "
-                    f"viewport gagal: {shot_resp.get('error', 'unknown')}")
-    except LiveError as exc:
-        note = f"Model sudah diubah di live Blender, tapi screenshot gagal: {exc}"
+    note = _capture_viewport(version_dir, settings)
     files = sorted(p.name for p in version_dir.iterdir() if p.is_file())
     return files, note
 
@@ -371,34 +461,72 @@ def run_mod_turn(*, settings: dict, root: str | Path, chat_id: str,
         (version_dir / "spec.json").write_text(
             json.dumps(spec, indent=2), encoding="utf-8")
 
-        # 2. CODEGEN from the (revised) spec.
-        stage("codegen")
-        code_reply = provider.complete(
-            [text_msg("system", CODEGEN_SYSTEM),
-             text_msg("user", "SPEC:\n" + json.dumps(spec, indent=2)
-                      + "\n\nUSER PROMPT:\n" + prompt)],
-            model=model, temperature=0.2, max_tokens=8192, json_mode=False)
-        script = extract_code(code_reply)
-        if len(script.encode("utf-8")) > MAX_CODE_BYTES:
-            raise PipelineError("generated script larger than 100 KB")
-        findings = scan_text(script)
-        if findings:
-            detail = "; ".join(f"line {ln}: {d}" for ln, d in findings)
-            raise PipelineError(f"generated script refused: {detail}")
-        (version_dir / "generated.py").write_text(script, encoding="utf-8")
-
-        # 3. APPLY to the chosen target.
+        # 2-3. CODEGEN + APPLY, per target. Headless rebuilds a new file
+        # from the spec; live modifies the open file directly.
         timeout = float(settings.get("timeout") or 600)
         job_id = f"{chat_id}-v{n}"
         verified: bool | None = None
         note = ""
-        if target == "headless":
+        report = None
+        if target == "live":
+            stage("inventory")
+            inventory = _live_inventory(settings)
+            stage("codegen")
+            old_spec = session.get("spec")
+            mod_user = "\n".join([
+                "OLD SPEC (what the scene should currently match):",
+                json.dumps(old_spec, indent=2) if old_spec else
+                "(none — first turn; the scene may be empty or hold only "
+                "default objects)",
+                "",
+                "NEW SPEC (what the scene must match after this turn):",
+                json.dumps(spec, indent=2),
+                "",
+                "SCENE INVENTORY (live objects right now):",
+                json.dumps(_inventory_summary(inventory), indent=2),
+                "",
+                "USER REQUEST:",
+                prompt,
+            ])
+            mod_messages = [text_msg("system", LIVE_MOD_SYSTEM),
+                            text_msg("user", mod_user)]
+            if image_data:
+                mod_messages.append(image_msg(
+                    "user", "New reference images for this change:",
+                    image_data))
+            code_reply = provider.complete(
+                mod_messages, model=model, temperature=0.2,
+                max_tokens=8192, json_mode=False)
+            script = extract_code(code_reply)
+            if len(script.encode("utf-8")) > MAX_CODE_BYTES:
+                raise PipelineError("generated script larger than 100 KB")
+            findings = scan_text(script)
+            if findings:
+                detail = "; ".join(f"line {ln}: {d}" for ln, d in findings)
+                raise PipelineError(f"generated script refused: {detail}")
+            check_mod_script(script)
+            (version_dir / "generated.py").write_text(script, encoding="utf-8")
+            files, note = _apply_live_direct(
+                script, version_dir, settings, stage)
+        else:
+            stage("codegen")
+            code_reply = provider.complete(
+                [text_msg("system", CODEGEN_SYSTEM),
+                 text_msg("user", "SPEC:\n" + json.dumps(spec, indent=2)
+                          + "\n\nUSER PROMPT:\n" + prompt)],
+                model=model, temperature=0.2, max_tokens=8192,
+                json_mode=False)
+            script = extract_code(code_reply)
+            if len(script.encode("utf-8")) > MAX_CODE_BYTES:
+                raise PipelineError("generated script larger than 100 KB")
+            findings = scan_text(script)
+            if findings:
+                detail = "; ".join(f"line {ln}: {d}" for ln, d in findings)
+                raise PipelineError(f"generated script refused: {detail}")
+            (version_dir / "generated.py").write_text(script, encoding="utf-8")
             report, verified, files = _apply_headless(
                 script, version_dir, job_id, settings, blender_exe,
                 timeout, stage)
-        else:
-            files, note = _apply_live(script, version_dir, settings, stage)
-            report = None
         preview = None
         for candidate in ("preview.png", "viewport.png"):
             if candidate in files:
@@ -410,7 +538,9 @@ def run_mod_turn(*, settings: dict, root: str | Path, chat_id: str,
             current["spec"] = spec
             current["script"] = script
             current["versions"].append({
-                "n": n, "target": target, "dir": f"versions/v{n}",
+                "n": n, "target": target,
+                "mode": "direct" if target == "live" else "rebuild",
+                "dir": f"versions/v{n}",
                 "files": files, "verified": verified,
                 "preview": preview,
             })
@@ -419,6 +549,9 @@ def run_mod_turn(*, settings: dict, root: str | Path, chat_id: str,
             save_session(root, current)
 
         text = _summarize(spec, target, n, verified)
+        if target == "live":
+            text += ("\nSudah tampil di viewport Blender yang terbuka — "
+                     "tekan Ctrl+S di Blender untuk menyimpan file.")
         if note:
             text += "\n" + note
         return finish_ok({
@@ -434,6 +567,7 @@ def run_mod_turn(*, settings: dict, root: str | Path, chat_id: str,
 
 __all__ = [
     "chats_root",
+    "check_mod_script",
     "create_session",
     "load_session",
     "save_session",

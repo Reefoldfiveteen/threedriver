@@ -134,7 +134,7 @@
 <section id="tab-chat" hidden>
 <div class="card">
   <h2>Chat mod — revisi model lewat obrolan</h2>
-  <div class="hint">Tiap chat terikat ke satu model. Pesan pertama membuat modelnya; pesan lanjutan merevisi model yang sama, dan hanya bagian yang diminta yang berubah. Upload referensi baru kapan saja. Target Headless membangun ulang di proses baru (terverifikasi); target Live mengubah Blender yang sedang terbuka (addon save + backup dulu, scene dibangun ulang).</div>
+  <div class="hint">Tiap chat terikat ke satu model. Pesan pertama membuat modelnya; pesan lanjutan merevisi model yang sama, dan hanya bagian yang diminta yang berubah. Upload referensi baru kapan saja. Target Headless membangun file baru di proses baru (terverifikasi); target Live mengubah langsung objek di file Blender yang sedang terbuka — tanpa file baru, scene tidak dihapus, addon save + backup dulu, tekan Ctrl+S di Blender untuk menyimpan.</div>
   <div class="row">
     <div><label for="chatSelect">Chat</label><select id="chatSelect"></select></div>
     <div><label for="baseJob">Chat baru dari job (opsional)</label><select id="baseJob"><option value="">model baru dari nol</option></select></div>
@@ -146,7 +146,7 @@
   <label for="chatImages">Referensi baru (opsional, maks 5, @ maks 10 MB)</label>
   <input type="file" id="chatImages" accept="image/*" multiple>
   <div class="row">
-    <div><label for="chatTarget">Target</label><select id="chatTarget"><option value="headless">Headless (proses baru, terverifikasi)</option><option value="live">Live (Blender yang terbuka)</option></select></div>
+    <div><label for="chatTarget">Target</label><select id="chatTarget"><option value="headless">Headless (bangun file baru, terverifikasi)</option><option value="live">Live (ubah file yang terbuka, langsung)</option></select></div>
   </div>
   <button id="chatSendBtn">Kirim</button>
   <div id="chatMsg" class="msg"></div>

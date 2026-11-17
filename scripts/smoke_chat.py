@@ -65,6 +65,17 @@ def wait_for_turn(client, chat_id: str, prev_messages: int,
 def main() -> int:
     import httpx
 
+    from threedriver.chat import check_mod_script
+    from threedriver.pipeline import PipelineError
+    check_mod_script("import bpy\nbpy.data.objects['Cube'].location.x = 1")
+    try:
+        check_mod_script("bpy.ops.wm.save_as_mainfile(filepath='x.blend')")
+    except PipelineError:
+        pass
+    else:
+        raise AssertionError("save_as_mainfile was not refused")
+    print("mod-script guard ok")
+
     settings_path = ROOT / "tmp" / "smoke-chat-settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     if settings_path.exists():
@@ -236,10 +247,26 @@ def main() -> int:
             live_msg = session["messages"][-1]
             assert live_msg["status"] == "done", live_msg
             assert "screenshot" in live_msg["text"].lower(), live_msg
+            assert "langsung" in live_msg["text"], live_msg
+            assert "Ctrl+S" in live_msg["text"], live_msg
             live_ver = session["versions"][-1]
             assert live_ver["target"] == "live", live_ver
+            assert live_ver["mode"] == "direct", live_ver
             assert "generated.py" in live_ver["files"], live_ver
-            print("live turn ok via chat (exec ran, screenshot note kept)")
+            assert not any(f.endswith(".blend")
+                           for f in live_ver["files"]), live_ver
+            print("live direct-mod turn ok (no new .blend, "
+                  "screenshot note kept)")
+
+        # The stub mod script scaled the live Cube x2 in place: prove the
+        # open scene itself changed, not a new file.
+        with LiveClient(port=LIVE_PORT, token=TEST_TOKEN,
+                        timeout=10.0) as lc:
+            scene = lc.get_scene()["result"]
+        cube = next(o for o in scene["objects"] if o["name"] == "Cube")
+        assert cube["dimensions"] == [4.0, 4.0, 4.0], cube
+        print("live scene actually modified: Cube dimensions",
+              cube["dimensions"])
 
         with LiveClient(port=LIVE_PORT, token=TEST_TOKEN,
                         timeout=10.0) as lc:

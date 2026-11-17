@@ -6,7 +6,7 @@ or live — and hands back a `.blend`, exports, a preview render, and a
 measurement report. The name means "the thing that drives Blender", not a
 hardware driver.
 
-Status: **POC-5 — chat mod, plus model-list fetch in Settings.** Pick a provider on the Settings page,
+Status: **Chat mod with live direct modification (0.7.0), plus model-list fetch in Settings.** Pick a provider on the Settings page,
 type a prompt, get a verified model — or drive the Blender already open on
 your screen and watch the viewport change. The CAD bridges come next. See
 `RESEARCH-HYBRID.md` for the full design (in Indonesian).
@@ -151,6 +151,12 @@ Solid/Wireframe buttons in the Live tab) switches every 3D viewport's
 shading without touching the scene — no save, no backup. Older addons
 answer "unknown command type": reinstall the .zip.
 
+Screenshots (addon 0.3.0+) run `render.opengl` under a VIEW_3D context
+override: the timer pump has no area context, so a bare call fails its
+poll even in the GUI — that was the bug behind "viewport view belum
+jalan" on the laptop. The GUI render itself is still only provable on
+the laptop; headless, screenshots fail with the real cause attached.
+
 ## Chat mod (POC-5): revise a model across follow-up turns
 
 One-shot generation is only half the job. The **Chat mod** tab (third tab
@@ -160,18 +166,22 @@ in the web UI) holds conversations anchored to one model each:
 * Every later message revises it: the LLM revises the stored spec JSON,
   changing ONLY what was asked, writes a fresh script from the revised
   spec, and applies it. New reference images can be uploaded on any turn.
-* Each turn targets **headless** (fresh process, probe-verified, a new
-  `versions/v<n>/` directory) or **live** (the full script runs in the
-  open Blender — the addon saves + backs up first — then a viewport
-  screenshot is captured). A chat can mix targets turn by turn.
+* Each turn targets **headless** (fresh process, probe-verified, builds
+  a NEW file in `versions/v<n>/`) or **live** (DIRECT MODIFICATION: the
+  turn reads the open scene's inventory first, then the LLM writes a
+  script that edits those objects in place — no scene clear, no new
+  file — and a viewport screenshot is captured after). A chat can mix
+  targets turn by turn.
 * A chat can also start from a finished one-shot job (pick it in the
   "Chat baru dari job" dropdown): the job's spec + script seed the chat.
 
-Live rebuild semantics, stated plainly: a live turn runs the whole
-script, which clears the scene first. The pre-mod file survives only as
-the addon's timestamped backup copy, and after the turn the active file
-in Blender is the new version's `model.blend`. Headless turns never
-touch the open Blender.
+Live direct-modification semantics, stated plainly: a live turn never
+clears the scene and never writes a file. The addon saves + backs up
+the open file BEFORE executing (its safety contract); the mod script
+then edits the in-memory scene, and the user saves with Ctrl+S when
+happy. Mod scripts are refused if they try to save or open files. If
+the scene holds no matching objects, the script builds the part in the
+current scene. Headless turns never touch the open Blender.
 
 ## Job contract
 
@@ -260,8 +270,11 @@ RESEARCH-HYBRID.md    architecture, contracts, POC plan (Indonesian)
 4. POC-4 web UI live tab (headless test + live settings, viewport
    screenshot, code exec from the browser) — done.
 5. POC-5 chat mod (follow-up revisions, headless/live targets, tab
-   switcher, viewport wireframe toggle) — done (this release).
-6. Next: vision check of renders vs reference (six-side ortho renders
+   switcher, viewport wireframe toggle) — done.
+6. Live direct modification (inventory + in-place edits, no rebuild)
+   + viewport screenshot context-override fix (addon 0.3.0) — done
+   (0.7.0, this release).
+7. Next: vision check of renders vs reference (six-side ortho renders
    compared by a vision model, revising only what missed).
-7. Optional: CadQuery executor for prismatic parts, local instant-mesh
+8. Optional: CadQuery executor for prismatic parts, local instant-mesh
    models (TripoSR), 3ds Max / Inventor bridges.

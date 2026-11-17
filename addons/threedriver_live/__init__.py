@@ -31,7 +31,7 @@ Protocol (one JSON object per line, "\\n" terminated):
 bl_info = {
     "name": "3Driver Live",
     "author": "Reefoldfiveteen",
-    "version": (0, 2, 0),
+    "version": (0, 3, 0),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > 3Driver",
     "description": "Local socket server so 3Driver can drive this Blender "
@@ -295,19 +295,49 @@ def _execute_code(code: str) -> dict:
 
 
 def _screenshot(filepath: str | None) -> dict:
+    """Viewport screenshot via render.opengl, with a VIEW_3D context.
+
+    The pump runs on a timer, where bpy.context has no area — calling
+    render.opengl bare fails its poll even in the GUI ("context is
+    incorrect"). Overriding the context with a real 3D viewport area
+    (and its WINDOW region) is what makes the operator run. Headless
+    Blender still fails, but with the real cause attached.
+    """
     if not filepath:
         return {"ok": False, "error": "screenshot needs a filepath"}
+    screen = bpy.context.screen
+    if screen is None:
+        return {"ok": False,
+                "error": "screenshot needs a Blender GUI viewport: "
+                         "no screen (headless?)"}
+    area = next((a for a in screen.areas if a.type == "VIEW_3D"), None)
+    if area is None:
+        return {"ok": False,
+                "error": "screenshot needs a Blender GUI viewport: "
+                         "no 3D viewport open"}
+    region = next((r for r in area.regions if r.type == "WINDOW"), None)
     scene = bpy.context.scene
     previous = scene.render.filepath
     try:
         scene.render.filepath = filepath
-        bpy.ops.render.opengl(write_still=True)
-    except Exception as exc:  # noqa: BLE001 - headless has no GL context
+        override: dict = {"area": area}
+        if region is not None:
+            override["region"] = region
+        with bpy.context.temp_override(**override):
+            bpy.ops.render.opengl(write_still=True)
+    except Exception:
+        detail = traceback.format_exc(limit=3).strip().splitlines()
+        cause = detail[-1] if detail else "unknown error"
         return {"ok": False,
-                "error": f"screenshot needs a Blender GUI viewport: {exc}"}
+                "error": "screenshot failed (needs a Blender GUI viewport "
+                         f"with a GL context): {cause}"}
     finally:
         scene.render.filepath = previous
-    size = Path(filepath).stat().st_size if Path(filepath).is_file() else 0
+    path = Path(filepath)
+    size = path.stat().st_size if path.is_file() else 0
+    if size == 0:
+        return {"ok": False,
+                "error": "screenshot produced no file at the given path"}
     return {"ok": True, "filepath": filepath, "bytes": size}
 
 
