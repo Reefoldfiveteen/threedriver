@@ -72,6 +72,32 @@ def resolve_blender(explicit: str | Path | None = None) -> str:
     )
 
 
+def blender_arg_from_settings(settings: dict) -> str | None:
+    """Explicit Blender path per the settings mode.
+
+    Mode "auto" (default): return None so resolve_blender() auto-detects
+    (env var, PATH, standard Windows install). Mode "custom": the stored
+    path is mandatory and must exist — an empty or missing custom path is
+    an error, never a silent fallback, so the user always knows exactly
+    which Blender will run.
+    """
+    if (settings.get("blender_mode") or "auto") != "custom":
+        return None
+    path = (settings.get("blender") or "").strip()
+    if not path:
+        raise BlenderNotFound(
+            "Blender location mode is 'custom' but no path is set — fill "
+            "in the blender.exe path in Settings, or switch the mode back "
+            "to automatic."
+        )
+    if not Path(path).is_file():
+        raise BlenderNotFound(
+            f"custom Blender path not found: {path} — fix the path in "
+            "Settings, or switch the mode back to automatic."
+        )
+    return path
+
+
 def new_job_id() -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return f"job-{stamp}-{uuid.uuid4().hex[:6]}"

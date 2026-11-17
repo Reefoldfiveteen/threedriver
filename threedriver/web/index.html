@@ -12,6 +12,8 @@
   main { max-width: 860px; margin: 0 auto; padding: 16px; }
   .card { background: #fff; border-radius: 10px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
   .card h2 { margin: 0 0 12px; font-size: 17px; }
+  .card h3 { margin: 18px 0 2px; font-size: 14px; color: #374151; }
+  #viewportImg { max-width: 100%; border-radius: 6px; margin-top: 8px; display: none; }
   label { display: block; font-size: 13px; font-weight: 600; margin: 10px 0 4px; }
   input[type=text], input[type=password], input[type=number], select, textarea {
     width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; }
@@ -39,7 +41,8 @@
 <main>
 
 <div class="card">
-  <h2>Pengaturan AI</h2>
+  <h2>Pengaturan</h2>
+  <h3>AI</h3>
   <label for="provider">Provider</label>
   <select id="provider"></select>
   <div class="row">
@@ -49,13 +52,42 @@
   <label for="api_key">API key</label>
   <input type="password" id="api_key" placeholder="Kosongkan untuk memakai key yang sudah tersimpan">
   <div class="hint">Key tersimpan lokal di settings.json (tidak ikut ke GitHub) dan tidak pernah ditampilkan utuh.</div>
+  <h3>Headless — Blender batch (job)</h3>
+  <label for="blender_mode">Lokasi Blender</label>
+  <select id="blender_mode">
+    <option value="auto">Otomatis (bawaan) — 3Driver mencari sendiri blender.exe</option>
+    <option value="custom">Custom — saya isi sendiri path blender.exe</option>
+  </select>
   <div class="row">
-    <div><label for="blender">Lokasi Blender (kosong = otomatis)</label><input type="text" id="blender"></div>
+    <div><label for="blender">Path blender.exe (dipakai kalau mode Custom)</label><input type="text" id="blender"></div>
     <div><label for="timeout">Timeout per job (detik)</label><input type="number" id="timeout" min="30"></div>
   </div>
+  <div id="blenderDetected" class="hint"></div>
+  <h3>Live — Blender yang sedang terbuka</h3>
+  <div class="row">
+    <div><label for="live_port">Port server live</label><input type="number" id="live_port" min="1" max="65535"></div>
+    <div><label for="live_token">Token live (kosong = baca file token)</label><input type="password" id="live_token"></div>
+  </div>
+  <div class="hint">Token dibuat otomatis oleh addon saat server pertama dinyalakan, tersimpan di file ~/.threedriver/live_token. Isi kolom ini hanya kalau token-nya beda dari file itu.</div>
   <button id="saveBtn">Simpan pengaturan</button>
   <button id="testBtn" class="secondary">Tes koneksi provider</button>
+  <button id="testBlenderBtn" class="secondary">Tes Blender headless</button>
   <div id="settingsMsg" class="msg"></div>
+</div>
+
+<div class="card">
+  <h2>Live Blender — viewport &amp; kontrol</h2>
+  <div class="hint">Supaya ini jalan, Blender harus kebuka dan servernya nyala: di Blender, N-panel &gt; tab 3Driver &gt; Start Server. Kode yang dijalankan dari sini selalu didahului save + backup .blend oleh addon.</div>
+  <div id="liveStatus" style="margin-top:10px;font-size:13px;">Status live belum dicek.</div>
+  <button id="liveRefreshBtn" class="secondary">Refresh status</button>
+  <button id="liveShotBtn" class="secondary">Ambil screenshot viewport</button>
+  <img id="viewportImg" alt="viewport Blender">
+  <div id="liveScene"></div>
+  <label for="liveCode">Kode bpy untuk dijalankan di live Blender</label>
+  <textarea id="liveCode" placeholder="Contoh: import bpy, lalu print([o.name for o in bpy.data.objects])"></textarea>
+  <button id="liveExecBtn">Jalankan kode di live Blender</button>
+  <pre id="liveOut" style="display:none"></pre>
+  <div id="liveMsg" class="msg"></div>
 </div>
 
 <div class="card">
@@ -91,7 +123,13 @@ async function loadSettings() {
   $('model').value = set.model || '';
   $('base_url').value = set.base_url || '';
   $('blender').value = set.blender || '';
+  $('blender_mode').value = set.blender_mode || 'auto';
+  applyBlenderMode();
   $('timeout').value = set.timeout || 600;
+  $('live_port').value = set.live_port || 9877;
+  $('live_token').placeholder = set.has_live_token
+    ? 'tersimpan (' + (set.live_token || '••••') + ') — kosongkan untuk tetap memakai yang tersimpan'
+    : 'kosong = baca file token ~/.threedriver/live_token';
   applyProviderDefaults(false);
 }
 
@@ -107,12 +145,32 @@ function applyProviderDefaults(fillEmpty) {
 }
 $('provider').addEventListener('change', () => applyProviderDefaults(true));
 
+function applyBlenderMode() {
+  const custom = $('blender_mode').value === 'custom';
+  $('blender').disabled = !custom;
+  $('blender').placeholder = custom
+    ? 'C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe'
+    : 'otomatis — path di bawah diabaikan sampai mode diganti ke Custom';
+}
+$('blender_mode').addEventListener('change', applyBlenderMode);
+
+async function refreshBlenderDetection() {
+  try {
+    const data = await (await fetch('/api/test-blender', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' })).json();
+    $('blenderDetected').textContent = data.ok
+      ? ('Terdeteksi (' + data.mode + '): ' + data.path + ' — ' + data.version)
+      : ('Blender tidak terdeteksi: ' + (data.error || 'unknown'));
+  } catch (e) { $('blenderDetected').textContent = ''; }
+}
+
 $('saveBtn').addEventListener('click', async () => {
   const body = { provider: $('provider').value, model: $('model').value.trim(),
     base_url: $('base_url').value.trim(), api_key: $('api_key').value,
-    blender: $('blender').value.trim(), timeout: parseInt($('timeout').value || '600', 10) };
+    blender: $('blender').value.trim(), blender_mode: $('blender_mode').value,
+    timeout: parseInt($('timeout').value || '600', 10),
+    live_port: parseInt($('live_port').value || '9877', 10), live_token: $('live_token').value };
   const res = await fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
-  if (res.ok) { $('api_key').value = ''; showMsg($('settingsMsg'), 'Pengaturan tersimpan.', true); }
+  if (res.ok) { $('api_key').value = ''; $('live_token').value = ''; showMsg($('settingsMsg'), 'Pengaturan tersimpan.', true); refreshBlenderDetection(); }
   else showMsg($('settingsMsg'), 'Gagal menyimpan: ' + await res.text(), false);
 });
 
@@ -170,8 +228,51 @@ async function refreshJobs() {
   } catch (e) { /* server restart? next poll retries */ }
 }
 
+$('testBlenderBtn').addEventListener('click', async () => {
+  showMsg($('settingsMsg'), 'Mencari Blender…', true);
+  const res = await fetch('/api/test-blender', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({blender: $('blender').value.trim(), blender_mode: $('blender_mode').value}) });
+  const data = await res.json();
+  showMsg($('settingsMsg'), data.ok ? ('Blender ketemu (' + data.mode + '): ' + data.path + ' (' + data.version + ')') : ('Blender tidak ketemu: ' + (data.error || 'unknown')), data.ok);
+  refreshBlenderDetection();
+});
+
+async function refreshLive() {
+  $('liveStatus').textContent = 'Menghubungi live Blender…';
+  try {
+    const data = await (await fetch('/api/live/status')).json();
+    if (!data.ok) { $('liveStatus').textContent = 'Live tidak terhubung: ' + (data.error || 'unknown'); $('liveScene').innerHTML = ''; return; }
+    const objs = ((data.scene || {}).objects || []).map(o => o.name).join(', ') || '(kosong)';
+    $('liveStatus').textContent = 'Terhubung ke Blender ' + (data.blender_version || '?') + ' (live).';
+    $('liveScene').innerHTML = '<div class="hint">Objek di scene: ' + objs.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</div>';
+  } catch (e) { $('liveStatus').textContent = 'Gagal menghubungi server web UI.'; }
+}
+$('liveRefreshBtn').addEventListener('click', refreshLive);
+
+$('liveShotBtn').addEventListener('click', async () => {
+  showMsg($('liveMsg'), 'Mengambil screenshot viewport…', true);
+  const data = await (await fetch('/api/live/screenshot', { method: 'POST' })).json();
+  if (!data.ok) { showMsg($('liveMsg'), 'Screenshot gagal: ' + (data.error || 'unknown'), false); return; }
+  $('viewportImg').src = '/api/live/viewport.png?t=' + Date.now();
+  $('viewportImg').style.display = 'block';
+  showMsg($('liveMsg'), 'Screenshot viewport diperbarui (' + data.bytes + ' byte).', true);
+});
+
+$('liveExecBtn').addEventListener('click', async () => {
+  const code = $('liveCode').value;
+  if (!code.trim()) { showMsg($('liveMsg'), 'Kode masih kosong.', false); return; }
+  $('liveExecBtn').disabled = true;
+  showMsg($('liveMsg'), 'Menjalankan kode di live Blender… (addon save + backup dulu)', true);
+  const data = await (await fetch('/api/live/exec', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({code}) })).json();
+  $('liveExecBtn').disabled = false;
+  const out = $('liveOut'); out.style.display = 'block';
+  out.textContent = JSON.stringify(data, null, 2);
+  showMsg($('liveMsg'), data.ok ? 'Kode selesai dijalankan.' : ('Kode gagal: ' + (data.error || 'unknown')), !!data.ok);
+});
+
 loadSettings();
 refreshJobs();
+refreshLive();
+refreshBlenderDetection();
 setInterval(refreshJobs, 2500);
 </script>
 </body>

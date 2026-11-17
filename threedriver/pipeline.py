@@ -21,7 +21,12 @@ import re
 from pathlib import Path
 
 from .config import load_settings
-from .headless import new_job_dir, run_job
+from .headless import (
+    BlenderNotFound,
+    blender_arg_from_settings,
+    new_job_dir,
+    run_job,
+)
 from .providers import ProviderError, get_provider, text_msg
 from .providers.base import image_msg
 from .scan import scan_text
@@ -165,6 +170,10 @@ def run_pipeline(
         return result
 
     try:
+        # Resolve the Blender location first: a bad custom path must fail
+        # before any provider call is spent.
+        blender_exe = blender_arg_from_settings(settings)
+
         # 1. SPEC
         stage("spec")
         spec_messages = [
@@ -211,7 +220,7 @@ def run_pipeline(
         stage("build")
         result = run_job(
             script_path, job_dir, job_id=job_id,
-            blender=settings.get("blender") or None,
+            blender=blender_exe,
             timeout=float(settings.get("timeout") or 600),
             scan=False,  # already scanned above; scan once, not twice
         )
@@ -231,7 +240,7 @@ def run_pipeline(
             probe = run_job(
                 Path(__file__).resolve().parent / "bpy" / "probe.py",
                 job_dir, job_id=job_id,
-                blender=settings.get("blender") or None,
+                blender=blender_exe,
                 timeout=float(settings.get("timeout") or 600),
                 extra_args=["--blend", str(blend),
                             "--report", str(job_dir / "report.json")],
@@ -245,6 +254,8 @@ def run_pipeline(
         return {"job_id": job_id, "job_dir": str(job_dir), "status": "done",
                 "spec": spec, "report": report, "probe": probe_report,
                 "verified": verified, "files": files}
+    except BlenderNotFound as exc:
+        return fail("build", str(exc))
     except ProviderError as exc:
         return fail("provider", str(exc))
     except PipelineError as exc:

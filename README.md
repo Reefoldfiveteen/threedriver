@@ -6,7 +6,7 @@ or live — and hands back a `.blend`, exports, a preview render, and a
 measurement report. The name means "the thing that drives Blender", not a
 hardware driver.
 
-Status: **POC-3 — live addon.** Pick a provider on the Settings page,
+Status: **POC-4 — web UI live tab.** Pick a provider on the Settings page,
 type a prompt, get a verified model — or drive the Blender already open on
 your screen and watch the viewport change. The CAD bridges come next. See
 `RESEARCH-HYBRID.md` for the full design (in Indonesian).
@@ -94,6 +94,8 @@ Install once on the laptop:
 python scripts/package_addon.py   # makes tmp/threedriver_live.zip
 ```
 
+Or download the ready-to-install .zip from the [Releases page](https://github.com/Reefoldfiveteen/threedriver/releases) (rebuilt automatically by GitHub Actions on every push).
+
 In Blender: Edit > Preferences > Add-ons > Install from Disk, pick the
 .zip, enable "3Driver Live". Open the N-panel (N key) > 3Driver tab >
 Start Server. The server binds 127.0.0.1:9877 and creates a secret token
@@ -109,6 +111,16 @@ python scripts/live_cmd.py exec my_nudge.py
 python scripts/live_cmd.py shot C:\Users\you\view.png
 python scripts/live_cmd.py shutdown
 ```
+
+Or use the Live tab in the web UI: the Settings page holds the live
+port/token, and the Live card shows connection status, scene objects, a
+viewport screenshot button, and a code box that runs snippets in the open
+Blender. The server must still be started from Blender first (same
+N-panel button) — the web UI only talks to it, it cannot start it.
+
+The Settings page also has a **Test Blender** button for headless jobs:
+it resolves the Blender executable and reports its `--version` output, so
+a missing or wrong Blender path shows up before any job runs.
 
 Hard rules (enforced by the addon, not by convention):
 
@@ -144,9 +156,13 @@ shot` once on the laptop and confirm the PNG shows the viewport.
   Generated scripts must not use booleans (they have silently failed to
   cut holes); holes are built directly via tessellation + wall stitching.
 
-Blender is located in this order: the Settings page value,
-`THREEDRIVER_BLENDER`, `PATH`, then the standard Windows install path
-(`C:\Program Files\Blender Foundation\Blender 5.2\blender.exe`).
+Blender is located per the Settings page mode: **automatic** (default)
+checks `THREEDRIVER_BLENDER`, `PATH`, then the standard Windows install
+path (`C:\Program Files\Blender Foundation\Blender 5.2\blender.exe`);
+**custom** uses exactly the path you typed — an empty or missing custom
+path is an error, never a silent fallback. The Test Blender button
+reports the resolved executable and its `--version` output, and the
+Settings page shows the currently detected Blender on load.
 
 ## Verification (the accuracy loop)
 
@@ -169,8 +185,8 @@ compensations:
 * Headless: isolated process + timeout + separate job directory per job.
 * A pre-execution text scan refuses scripts that touch the network, spawn
   subprocesses, or run shell commands. It is a tripwire, not a sandbox.
-* Live mode (coming): localhost-only socket, per-session token, always
-  save + work on a copy before running AI code.
+* Live mode: localhost-only socket, per-session token, always save +
+  write a timestamped backup copy before running code.
 
 ## Project layout
 
@@ -192,6 +208,7 @@ scripts/
   run_prompt.py       CLI: run the full prompt pipeline
   serve.py            CLI: start the web UI
   smoke_web.py        end-to-end web UI smoke test (stub provider)
+  smoke_live_ui.py    end-to-end live-tab smoke test (headless live server)
   live_cmd.py         CLI: talk to a running live Blender
   test_live_headless.py  end-to-end live addon test (headless Blender)
   package_addon.py    zip the live addon for Blender Install from Disk
@@ -203,8 +220,9 @@ RESEARCH-HYBRID.md    architecture, contracts, POC plan (Indonesian)
 
 1. POC-1 headless executor — done.
 2. POC-2 provider wiring + local web UI — done.
-3. POC-3 live socket addon — done (this release).
-4. Next: web UI live tab (drive the open Blender from the browser),
-   revision loop (vision check + fix only what missed).
-5. Optional: CadQuery executor for prismatic parts, local instant-mesh
+3. POC-3 live socket addon — done.
+4. POC-4 web UI live tab (headless test + live settings, viewport
+   screenshot, code exec from the browser) — done (this release).
+5. Next: revision loop (vision check + fix only what missed).
+6. Optional: CadQuery executor for prismatic parts, local instant-mesh
    models (TripoSR), 3ds Max / Inventor bridges.

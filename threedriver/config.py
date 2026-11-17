@@ -67,8 +67,11 @@ DEFAULTS: dict = {
     "base_url": "",
     "api_key": "",
     "blender": "",
+    "blender_mode": "auto",
     "timeout": 600,
     "jobs_root": "",
+    "live_port": 9877,
+    "live_token": "",
 }
 
 ENV_OVERRIDES = {
@@ -77,8 +80,11 @@ ENV_OVERRIDES = {
     "base_url": "THREEDRIVER_BASE_URL",
     "api_key": "THREEDRIVER_API_KEY",
     "blender": "THREEDRIVER_BLENDER",
+    "blender_mode": "THREEDRIVER_BLENDER_MODE",
     "timeout": "THREEDRIVER_TIMEOUT",
     "jobs_root": "THREEDRIVER_JOBS_ROOT",
+    "live_port": "THREEDRIVER_LIVE_PORT",
+    "live_token": "THREEDRIVER_LIVE_TOKEN",
 }
 
 
@@ -95,13 +101,19 @@ def load_settings(path: str | Path | None = None) -> dict:
     """Defaults <- settings file <- provider key env <- THREEDRIVER_* env."""
     path = Path(path) if path else default_settings_path()
     settings = dict(DEFAULTS)
+    stored_had_mode = False
     if path.is_file():
         try:
             stored = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(stored, dict):
+                stored_had_mode = "blender_mode" in stored
                 settings.update({k: v for k, v in stored.items() if k in DEFAULTS})
         except (json.JSONDecodeError, OSError):
             pass
+    # Migration: settings saved before blender_mode existed, with a path
+    # already filled in, mean "custom" — don't silently ignore that path.
+    if not stored_had_mode and settings.get("blender"):
+        settings["blender_mode"] = "custom"
     provider = _provider_defaults(settings["provider"])
     key_env = provider.get("key_env")
     if key_env and os.environ.get(key_env):
@@ -109,12 +121,14 @@ def load_settings(path: str | Path | None = None) -> dict:
     for key, env_name in ENV_OVERRIDES.items():
         if os.environ.get(env_name):
             value: object = os.environ[env_name]
-            if key == "timeout":
+            if key in ("timeout", "live_port"):
                 try:
                     value = int(value)  # type: ignore[arg-type]
                 except ValueError:
                     continue
             settings[key] = value
+    if settings.get("blender_mode") not in ("auto", "custom"):
+        settings["blender_mode"] = "auto"
     # Fill empty model/base_url from the selected provider's defaults.
     if not settings["model"]:
         settings["model"] = provider.get("default_model", "")
@@ -138,8 +152,8 @@ def save_settings(updates: dict, path: str | Path | None = None) -> dict:
     for key, value in updates.items():
         if key not in DEFAULTS:
             continue
-        if key == "api_key" and value in ("", None):
-            continue  # blank key field in the UI means "keep existing"
+        if key in ("api_key", "live_token") and value in ("", None):
+            continue  # blank key/token field in the UI means "keep existing"
         current[key] = value
     path.write_text(json.dumps(current, indent=2), encoding="utf-8")
     try:
@@ -155,6 +169,9 @@ def redact(settings: dict) -> dict:
     key = out.get("api_key") or ""
     out["api_key"] = f"••••{key[-4:]}" if len(key) > 4 else ("••••" if key else "")
     out["has_api_key"] = bool(key)
+    token = out.get("live_token") or ""
+    out["live_token"] = f"••••{token[-4:]}" if len(token) > 4 else ("••••" if token else "")
+    out["has_live_token"] = bool(token)
     return out
 
 

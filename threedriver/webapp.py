@@ -2,14 +2,19 @@
 
 Runs on 127.0.0.1 only — never exposed. Blender jobs run in worker threads,
 never in a request thread (see the headless contract in README.md); the UI
-polls job status. Job state is in-memory for POC-2; job outputs live on disk
-under tmp/jobs/<job_id>/ and survive a server restart.
+polls job status. Job state is in-memory; job outputs live on disk under
+tmp/jobs/<job_id>/ and survive a server restart.
+
+The Live tab talks to the 3Driver Live addon in an open Blender (status,
+viewport screenshot, execute code) over localhost + token. A stopped live
+server is a normal state: live endpoints report ok:false, never crash.
 
 Start:  python scripts/serve.py   (then open http://127.0.0.1:8765)
 """
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -24,6 +29,12 @@ from .config import (
     redact,
     save_settings,
 )
+from .headless import (
+    BlenderNotFound,
+    blender_arg_from_settings,
+    resolve_blender,
+)
+from .live_client import LiveClient, LiveError
 from .pipeline import run_pipeline
 from .providers import ProviderError, get_provider, text_msg
 
@@ -45,6 +56,23 @@ def _update_job(job_id: str, **fields) -> None:
     with _jobs_lock:
         if job_id in _jobs:
             _jobs[job_id].update(fields)
+
+
+def _live_client(settings: dict, timeout: float = 30.0) -> LiveClient:
+    """Client for the live addon, from settings. An empty settings token
+    falls back to THREEDRIVER_LIVE_TOKEN / the shared token file."""
+    try:
+        port = int(settings.get("live_port") or 9877)
+    except (TypeError, ValueError):
+        port = 9877
+    return LiveClient(port=port, token=settings.get("live_token") or None,
+                      timeout=timeout)
+
+
+def _live_shot_path() -> Path:
+    shot = Path.cwd() / "tmp" / "live" / "viewport.png"
+    shot.parent.mkdir(parents=True, exist_ok=True)
+    return shot
 
 
 def _run_job_thread(job_id: str, prompt: str, images, settings: dict) -> None:
@@ -84,13 +112,18 @@ def get_settings() -> dict:
 @app.post("/api/settings")
 def post_settings(payload: dict) -> dict:
     allowed = {"provider", "model", "base_url", "api_key", "blender",
-               "timeout", "jobs_root"}
+               "blender_mode", "timeout", "jobs_root", "live_port",
+               "live_token"}
     updates = {k: v for k, v in payload.items() if k in allowed}
-    if "timeout" in updates:
-        try:
-            updates["timeout"] = int(updates["timeout"])
-        except (TypeError, ValueError):
-            raise HTTPException(400, "timeout must be a number")
+    if ("blender_mode" in updates
+            and updates["blender_mode"] not in ("auto", "custom")):
+        raise HTTPException(400, "blender_mode must be 'auto' or 'custom'")
+    for num_key in ("timeout", "live_port"):
+        if num_key in updates:
+            try:
+                updates[num_key] = int(updates[num_key])
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"{num_key} must be a number")
     return redact(save_settings(updates))
 
 
@@ -111,6 +144,93 @@ def test_provider(payload: dict | None = None) -> dict:
     except ProviderError as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True, "reply": reply.strip()[:200]}
+
+
+@app.post("/api/test-blender")
+def test_blender(payload: dict | None = None) -> dict:
+    """Resolve the Blender executable per the settings mode and prove it
+    runs (--version). Accepts unsaved field overrides, like test-provider."""
+    settings = load_settings()
+    payload = payload or {}
+    if "blender" in payload:
+        settings["blender"] = payload["blender"] or ""
+    if "blender_mode" in payload:
+        settings["blender_mode"] = payload["blender_mode"] or "auto"
+    try:
+        exe = resolve_blender(blender_arg_from_settings(settings))
+    except BlenderNotFound as exc:
+        return {"ok": False, "error": str(exc)}
+    try:
+        proc = subprocess.run([exe, "--version"], capture_output=True,
+                              text=True, timeout=30)
+    except OSError as exc:
+        return {"ok": False, "error": f"could not run {exe}: {exc}"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"{exe} did not answer --version in 30s"}
+    first = (proc.stdout or "").splitlines()[:1]
+    return {"ok": True, "path": exe,
+            "mode": settings.get("blender_mode") or "auto",
+            "version": first[0].strip() if first else "(no version output)"}
+
+
+@app.get("/api/live/status")
+def live_status() -> dict:
+    """Ping the live addon + scene summary. A stopped server is reported
+    as ok:false, never as an exception."""
+    try:
+        with _live_client(load_settings()) as client:
+            ping = client.ping()
+            if not ping.get("ok"):
+                return {"ok": False, "error": ping.get("error", "ping failed")}
+            scene = client.get_scene()
+    except LiveError as exc:
+        return {"ok": False, "error": str(exc)}
+    if not scene.get("ok"):
+        return {"ok": False, "error": scene.get("error", "get_scene failed")}
+    return {"ok": True, "blender_version": ping.get("blender_version"),
+            "scene": scene.get("result", {})}
+
+
+@app.post("/api/live/screenshot")
+def live_screenshot() -> dict:
+    """Ask live Blender for a viewport screenshot; the PNG lands in
+    tmp/live/viewport.png and is served by GET /api/live/viewport.png."""
+    shot = _live_shot_path()
+    try:
+        with _live_client(load_settings()) as client:
+            resp = client.screenshot(str(shot))
+    except LiveError as exc:
+        return {"ok": False, "error": str(exc)}
+    if not resp.get("ok"):
+        return {"ok": False, "error": resp.get("error", "screenshot failed")}
+    if not shot.is_file():
+        return {"ok": False,
+                "error": "live Blender reported ok but no PNG was written"}
+    return {"ok": True, "bytes": shot.stat().st_size}
+
+
+@app.get("/api/live/viewport.png")
+def live_viewport_png():
+    shot = _live_shot_path()
+    if not shot.is_file():
+        raise HTTPException(404, "no viewport screenshot yet — take one first")
+    return FileResponse(shot, media_type="image/png", filename="viewport.png")
+
+
+@app.post("/api/live/exec")
+def live_exec(payload: dict) -> dict:
+    """Run one bpy snippet in live Blender. The addon saves + backs up
+    the .blend first (its own safety contract)."""
+    code = (payload or {}).get("code")
+    if not isinstance(code, str) or not code.strip():
+        raise HTTPException(400, "code must be a non-empty string")
+    if len(code) > 100_000:
+        raise HTTPException(400, "code larger than 100 KB")
+    try:
+        with _live_client(load_settings(), timeout=120.0) as client:
+            return client.execute(code, timeout=120.0)
+    except LiveError as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 @app.post("/api/jobs")
